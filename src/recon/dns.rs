@@ -1,7 +1,10 @@
+use std::net::{IpAddr, Ipv4Addr};
+use std::time::Duration;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
 use hickory_resolver::TokioAsyncResolver;
 
 use crate::auth::AuthorizationLevel;
@@ -15,6 +18,30 @@ impl DnsEnumerator {
     pub fn new() -> Self {
         Self
     }
+}
+
+/// Build a resolver with IPv4-only DNS servers and aggressive timeouts.
+fn build_resolver() -> TokioAsyncResolver {
+    // IPv4-only nameservers — avoids IPv6 timeout stalls on systems without IPv6.
+    let nameservers = NameServerConfigGroup::from_ips_clear(
+        &[
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),       // Google primary
+            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),       // Cloudflare primary
+            IpAddr::V4(Ipv4Addr::new(8, 8, 4, 4)),       // Google secondary
+            IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)),       // Cloudflare secondary
+        ],
+        53,
+        true, // trust_negative_responses
+    );
+
+    let config = ResolverConfig::from_parts(None, vec![], nameservers);
+
+    let mut opts = ResolverOpts::default();
+    opts.timeout = Duration::from_secs(3);  // 3s per query attempt
+    opts.attempts = 2;                       // 2 retries max
+    opts.rotate = true;                      // rotate between nameservers
+
+    TokioAsyncResolver::tokio(config, opts)
 }
 
 #[async_trait]
@@ -34,15 +61,39 @@ impl ReconModule for DnsEnumerator {
     async fn execute(&self, target: &str) -> Result<ReconResult> {
         tracing::info!("[dns-enum] Starting DNS enumeration for {}", target);
 
-        let resolver = TokioAsyncResolver::tokio(
-            ResolverConfig::default(),
-            ResolverOpts::default(),
+        // Safety timeout: DNS enumeration must complete within 15 seconds total.
+        match tokio::time::timeout(Duration::from_secs(15), self.run_queries(target)).await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::warn!("[dns-enum] DNS enumeration timed out after 15s for {}", target);
+                Ok(ReconResult {
+                    module_name: self.name().to_string(),
+                    target: target.to_string(),
+                    data: ReconData::DnsRecords(vec![]),
+                    timestamp: Utc::now(),
+                })
+            }
+        }
+    }
+}
+
+impl DnsEnumerator {
+    async fn run_queries(&self, target: &str) -> Result<ReconResult> {
+        let resolver = build_resolver();
+
+        // Run all DNS queries concurrently instead of sequentially.
+        let (ip_result, mx_result, txt_result, ns_result, soa_result) = tokio::join!(
+            resolver.lookup_ip(target),
+            resolver.mx_lookup(target),
+            resolver.txt_lookup(target),
+            resolver.ns_lookup(target),
+            resolver.soa_lookup(target),
         );
 
         let mut records = Vec::new();
 
-        // A / AAAA records via lookup_ip
-        match resolver.lookup_ip(target).await {
+        // A / AAAA records
+        match ip_result {
             Ok(response) => {
                 for addr in response.iter() {
                     let record_type = if addr.is_ipv4() { "A" } else { "AAAA" };
@@ -61,7 +112,7 @@ impl ReconModule for DnsEnumerator {
         }
 
         // MX records
-        match resolver.mx_lookup(target).await {
+        match mx_result {
             Ok(response) => {
                 for mx in response.iter() {
                     records.push(DnsRecord {
@@ -79,7 +130,7 @@ impl ReconModule for DnsEnumerator {
         }
 
         // TXT records
-        match resolver.txt_lookup(target).await {
+        match txt_result {
             Ok(response) => {
                 for txt in response.iter() {
                     let txt_data: String = txt.iter()
@@ -101,7 +152,7 @@ impl ReconModule for DnsEnumerator {
         }
 
         // NS records
-        match resolver.ns_lookup(target).await {
+        match ns_result {
             Ok(response) => {
                 for ns in response.iter() {
                     records.push(DnsRecord {
@@ -119,7 +170,7 @@ impl ReconModule for DnsEnumerator {
         }
 
         // SOA record
-        match resolver.soa_lookup(target).await {
+        match soa_result {
             Ok(response) => {
                 for soa in response.iter() {
                     records.push(DnsRecord {
