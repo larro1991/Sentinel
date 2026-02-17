@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -146,6 +148,24 @@ pub struct WatchConfig {
     /// List of honeypot services to run.
     #[serde(default)]
     pub services: Vec<WatchServiceConfig>,
+    /// Scope filter for dropping or tagging events from excluded IPs.
+    #[serde(default)]
+    pub scope_filter: Option<WatchScopeFilterConfig>,
+    /// Per-source-IP event rate limiting.
+    #[serde(default)]
+    pub rate_limit: Option<WatchRateLimitConfig>,
+    /// Webhook alert sinks (Slack, generic URL).
+    #[serde(default)]
+    pub webhooks: Vec<WebhookSinkConfig>,
+    /// GeoIP enrichment provider.
+    #[serde(default)]
+    pub geoip: Option<GeoIpConfig>,
+    /// Live dashboard configuration.
+    #[serde(default)]
+    pub dashboard: Option<DashboardConfig>,
+    /// Log file rotation settings.
+    #[serde(default)]
+    pub log_rotation: Option<LogRotationConfig>,
 }
 
 fn default_bind_address() -> String {
@@ -155,17 +175,129 @@ fn default_bind_address() -> String {
 /// Configuration for a single honeypot service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchServiceConfig {
-    /// Protocol identifier: "ssh", "http", "smb", "ftp", "telnet", "rdp".
+    /// Protocol identifier: "ssh", "http", "smb", "ftp", "telnet", "rdp", "smtp", "dns", "mysql", "postgres".
     pub protocol: String,
-    /// TCP port to listen on.
+    /// TCP (or UDP for DNS) port to listen on.
     pub port: u16,
     /// Whether this listener is active.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     /// Optional custom banner string (used by ssh, ftp).
     pub banner: Option<String>,
+    /// Per-protocol key-value options (e.g., shell_enabled: "true" for SSH).
+    #[serde(default)]
+    pub options: HashMap<String, String>,
 }
 
 fn default_enabled() -> bool {
     true
+}
+
+/// Controls whether events from IPs outside the engagement scope are dropped or tagged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchScopeFilterConfig {
+    /// "drop" — silently discard events; "tag" — add an out_of_scope detail.
+    #[serde(default = "default_scope_action")]
+    pub action: String,
+}
+
+fn default_scope_action() -> String {
+    "tag".to_string()
+}
+
+/// Per-source-IP sliding-window rate limiting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchRateLimitConfig {
+    /// Maximum number of events per IP within the window.
+    #[serde(default = "default_max_events")]
+    pub max_events_per_ip: u64,
+    /// Window duration in seconds.
+    #[serde(default = "default_window_secs")]
+    pub window_secs: u64,
+}
+
+fn default_max_events() -> u64 {
+    100
+}
+
+fn default_window_secs() -> u64 {
+    60
+}
+
+/// Webhook sink — POST JSON alerts to a URL (Slack, generic endpoint).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookSinkConfig {
+    /// Target URL to POST events to.
+    pub url: String,
+    /// Friendly name for logging.
+    #[serde(default = "default_webhook_name")]
+    pub name: String,
+    /// Minimum severity to forward (Critical, High, Medium, Low, Info).
+    #[serde(default = "default_min_severity")]
+    pub min_severity: String,
+}
+
+fn default_webhook_name() -> String {
+    "webhook".to_string()
+}
+
+fn default_min_severity() -> String {
+    "Info".to_string()
+}
+
+/// GeoIP enrichment configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeoIpConfig {
+    /// Provider: "ip-api" (default, free).
+    #[serde(default = "default_geo_provider")]
+    pub provider: String,
+    /// Maximum number of cached lookups.
+    #[serde(default = "default_cache_size")]
+    pub cache_size: usize,
+}
+
+fn default_geo_provider() -> String {
+    "ip-api".to_string()
+}
+
+fn default_cache_size() -> usize {
+    10_000
+}
+
+/// Live dashboard configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardConfig {
+    /// HTTP port for the dashboard server.
+    #[serde(default = "default_dashboard_port")]
+    pub port: u16,
+    /// Bind address for the dashboard.
+    #[serde(default = "default_dashboard_bind")]
+    pub bind_address: String,
+}
+
+fn default_dashboard_port() -> u16 {
+    9090
+}
+
+fn default_dashboard_bind() -> String {
+    "0.0.0.0".to_string()
+}
+
+/// NDJSON log file rotation settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogRotationConfig {
+    /// Maximum size of a single log file in bytes before rotation.
+    #[serde(default = "default_max_size_bytes")]
+    pub max_size_bytes: u64,
+    /// Maximum number of rotated files to keep.
+    #[serde(default = "default_max_files")]
+    pub max_files: u32,
+}
+
+fn default_max_size_bytes() -> u64 {
+    50 * 1024 * 1024 // 50 MiB
+}
+
+fn default_max_files() -> u32 {
+    10
 }

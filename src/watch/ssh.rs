@@ -9,17 +9,21 @@ use tracing::{debug, error, info, warn};
 use std::time::Duration;
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
+const SHELL_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_BANNER: &str = "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4";
 const MAX_LINE_LENGTH: usize = 4096;
+const SHELL_PROMPT: &str = "root@ubuntu-server:~$ ";
 
 pub struct SshHoneypot {
     banner: String,
+    shell_enabled: bool,
 }
 
 impl SshHoneypot {
-    pub fn new(banner: Option<&str>) -> Self {
+    pub fn new(banner: Option<&str>, shell_enabled: bool) -> Self {
         Self {
             banner: banner.unwrap_or(DEFAULT_BANNER).to_string(),
+            shell_enabled,
         }
     }
 }
@@ -74,6 +78,7 @@ impl WatchListener for SshHoneypot {
                             let port = bind_addr.port();
                             let listener_name = self.name().to_string();
                             let protocol = self.protocol().to_string();
+                            let shell_enabled = self.shell_enabled;
 
                             tokio::spawn(async move {
                                 if let Err(e) = handle_connection(
@@ -84,6 +89,7 @@ impl WatchListener for SshHoneypot {
                                     &listener_name,
                                     &protocol,
                                     tx,
+                                    shell_enabled,
                                 )
                                 .await
                                 {
@@ -121,6 +127,7 @@ async fn handle_connection(
     listener_name: &str,
     protocol: &str,
     events_tx: mpsc::UnboundedSender<WatchEvent>,
+    shell_enabled: bool,
 ) -> anyhow::Result<()> {
     tokio::time::timeout(CONNECTION_TIMEOUT, async {
         // ---- Step 1: Send the server banner ----
@@ -151,17 +158,7 @@ async fn handle_connection(
         }
 
         // ---- Step 3: Simulate a simplified key-exchange / auth phase ----
-        //
-        // Real SSH performs a binary key-exchange, but most scanners and
-        // brute-forcers send recognisable patterns even in the early bytes.
-        // We read additional lines / data and try to extract credential-like
-        // information.
-        //
-        // The honeypot does NOT implement a real SSH protocol -- it simply
-        // reads whatever the client sends and looks for username:password
-        // patterns that many automated tools send in plaintext or
-        // weakly-encoded form.
-
+        let mut credentials_captured = false;
         let mut buf = vec![0u8; MAX_LINE_LENGTH];
         loop {
             let n = match stream.read(&mut buf).await {
@@ -173,9 +170,6 @@ async fn handle_connection(
             let raw = &buf[..n];
             let data = String::from_utf8_lossy(raw).to_string();
 
-            // Try to extract username / password from the raw payload.
-            // Many brute-force tools send cleartext or base64-encoded
-            // credentials even before proper key exchange.
             if let Some((username, password)) = try_extract_credentials(&data) {
                 warn!(
                     "SSH credential capture from {}: user={} pass={}",
@@ -198,8 +192,9 @@ async fn handle_connection(
                     .details
                     .insert("password".to_string(), password);
                 let _ = events_tx.send(event);
+                credentials_captured = true;
+                break; // Move to shell or disconnect.
             } else if !data.trim().is_empty() {
-                // Treat any other non-empty payload as a protocol probe.
                 debug!("SSH probe data from {}: {:?}", peer_addr, data);
 
                 let mut event = WatchEvent::new(
@@ -214,27 +209,176 @@ async fn handle_connection(
                 let _ = events_tx.send(event);
             }
 
-            // After reading a chunk, send a fake "permission denied" style
-            // response to encourage the client to retry and reveal more
-            // credentials.  We use an SSH-style disconnect message
-            // (plaintext approximation).
             let denial = b"Permission denied (publickey,password).\r\n";
             if stream.write_all(denial).await.is_err() {
                 break;
             }
         }
 
-        Ok::<(), anyhow::Error>(())
+        Ok::<(bool,), anyhow::Error>((credentials_captured,))
     })
     .await
     .map_err(|_| anyhow::anyhow!("connection timed out after {:?}", CONNECTION_TIMEOUT))??;
 
+    // ---- Step 4: Optional fake shell session ----
+    if shell_enabled {
+        let _ = run_fake_shell(
+            &mut stream,
+            peer_addr,
+            dest_port,
+            listener_name,
+            protocol,
+            &events_tx,
+        )
+        .await;
+    }
+
     Ok(())
 }
 
+/// Run a fake shell session that captures post-auth commands.
+async fn run_fake_shell(
+    stream: &mut tokio::net::TcpStream,
+    peer_addr: SocketAddr,
+    dest_port: u16,
+    listener_name: &str,
+    protocol: &str,
+    events_tx: &mpsc::UnboundedSender<WatchEvent>,
+) -> anyhow::Result<()> {
+    tokio::time::timeout(SHELL_TIMEOUT, async {
+        // "Accept" the login.
+        stream
+            .write_all(b"\r\nWelcome to Ubuntu 22.04.3 LTS (GNU/Linux 5.15.0-89-generic x86_64)\r\n\r\n")
+            .await?;
+        stream
+            .write_all(b" * Documentation:  https://help.ubuntu.com\r\n")
+            .await?;
+        stream
+            .write_all(b" * Management:     https://landscape.canonical.com\r\n")
+            .await?;
+        stream
+            .write_all(b" * Support:        https://ubuntu.com/advantage\r\n\r\n")
+            .await?;
+        stream
+            .write_all(b"Last login: Mon Feb 16 14:22:31 2026 from 10.0.0.1\r\n")
+            .await?;
+        stream.write_all(SHELL_PROMPT.as_bytes()).await?;
+        stream.flush().await?;
+
+        loop {
+            let cmd_line = read_line(stream).await?;
+            let cmd = cmd_line.trim().to_string();
+
+            if cmd.is_empty() {
+                stream.write_all(SHELL_PROMPT.as_bytes()).await?;
+                stream.flush().await?;
+                continue;
+            }
+
+            // Emit CommandCapture event.
+            let mut event = WatchEvent::new(
+                listener_name,
+                protocol,
+                peer_addr,
+                dest_port,
+                WatchEventType::CommandCapture,
+                Severity::Critical,
+            );
+            event.captured_data = Some(cmd.clone());
+            event
+                .details
+                .insert("command".to_string(), cmd.clone());
+            let _ = events_tx.send(event);
+
+            let cmd_lower = cmd.to_lowercase();
+            let parts: Vec<&str> = cmd_lower.split_whitespace().collect();
+            let base_cmd = parts.first().copied().unwrap_or("");
+
+            if base_cmd == "exit" || base_cmd == "logout" || base_cmd == "quit" {
+                stream.write_all(b"logout\r\n").await?;
+                stream.flush().await?;
+                break;
+            }
+
+            let response = fake_command_output(base_cmd, &cmd);
+            stream.write_all(response.as_bytes()).await?;
+            stream.write_all(SHELL_PROMPT.as_bytes()).await?;
+            stream.flush().await?;
+        }
+
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Shell session timed out"))?
+}
+
+/// Generate fake output for common commands.
+fn fake_command_output(base_cmd: &str, _full_cmd: &str) -> String {
+    match base_cmd {
+        "whoami" => "root\r\n".to_string(),
+        "id" => "uid=0(root) gid=0(root) groups=0(root)\r\n".to_string(),
+        "uname" => "Linux ubuntu-server 5.15.0-89-generic #99-Ubuntu SMP x86_64 GNU/Linux\r\n"
+            .to_string(),
+        "hostname" => "ubuntu-server\r\n".to_string(),
+        "pwd" => "/root\r\n".to_string(),
+        "ls" => "Desktop  Documents  Downloads  snap\r\n".to_string(),
+        "w" | "who" => "root     pts/0        2026-02-16 14:22 (10.0.0.1)\r\n".to_string(),
+        "uptime" => {
+            " 14:25:01 up 47 days,  3:12,  1 user,  load average: 0.08, 0.03, 0.01\r\n"
+                .to_string()
+        }
+        "ifconfig" | "ip" => concat!(
+            "eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST>  mtu 1500\r\n",
+            "        inet 10.0.0.50  netmask 255.255.255.0  broadcast 10.0.0.255\r\n",
+            "        ether 02:42:0a:00:00:32  txqueuelen 0  (Ethernet)\r\n",
+            "\r\n"
+        )
+        .to_string(),
+        "cat" => {
+            if _full_cmd.contains("/etc/passwd") {
+                concat!(
+                    "root:x:0:0:root:/root:/bin/bash\r\n",
+                    "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\r\n",
+                    "bin:x:2:2:bin:/bin:/usr/sbin/nologin\r\n",
+                    "sys:x:3:3:sys:/dev:/usr/sbin/nologin\r\n",
+                    "www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin\r\n",
+                    "nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\r\n",
+                    "sshd:x:110:65534::/run/sshd:/usr/sbin/nologin\r\n"
+                )
+                .to_string()
+            } else if _full_cmd.contains("/etc/shadow") {
+                "cat: /etc/shadow: Permission denied\r\n".to_string()
+            } else {
+                "cat: No such file or directory\r\n".to_string()
+            }
+        }
+        "ps" => concat!(
+            "  PID TTY          TIME CMD\r\n",
+            "    1 ?        00:00:03 systemd\r\n",
+            "  412 ?        00:00:00 sshd\r\n",
+            " 1024 pts/0    00:00:00 bash\r\n",
+            " 1031 pts/0    00:00:00 ps\r\n"
+        )
+        .to_string(),
+        "netstat" | "ss" => concat!(
+            "Netid  State   Recv-Q  Send-Q  Local Address:Port  Peer Address:Port\r\n",
+            "tcp    LISTEN  0       128     0.0.0.0:22           0.0.0.0:*\r\n",
+            "tcp    LISTEN  0       128     0.0.0.0:80           0.0.0.0:*\r\n"
+        )
+        .to_string(),
+        "curl" | "wget" => format!(
+            "bash: {}: command not found\r\n",
+            base_cmd
+        ),
+        _ => format!(
+            "bash: {}: command not found\r\n",
+            base_cmd
+        ),
+    }
+}
+
 /// Read a single `\n`-terminated line from the stream, up to `MAX_LINE_LENGTH`
-/// bytes.  Returns the line including the terminator so the caller can trim as
-/// needed.
+/// bytes.
 async fn read_line(stream: &mut tokio::net::TcpStream) -> anyhow::Result<String> {
     let mut line = Vec::with_capacity(256);
     let mut byte = [0u8; 1];
@@ -259,22 +403,12 @@ async fn read_line(stream: &mut tokio::net::TcpStream) -> anyhow::Result<String>
 }
 
 /// Attempt to extract a username:password pair from raw SSH data.
-///
-/// This is intentionally simplistic -- it catches:
-///   - Literal `user:password` or `user\x00password` patterns that many
-///     brute-force bots send.
-///   - Null-separated strings (common in SSH userauth requests where the
-///     username and password appear as length-prefixed strings).
-///
-/// Returns `Some((username, password))` if something plausible is found.
 fn try_extract_credentials(data: &str) -> Option<(String, String)> {
     // Pattern 1: colon-separated "user:pass" somewhere in the payload.
     if let Some(idx) = data.find(':') {
         let user_part = &data[..idx];
         let pass_part = &data[idx + 1..];
 
-        // Only accept if both sides look like printable, non-empty strings
-        // of reasonable length.
         let user = user_part
             .chars()
             .rev()
@@ -295,9 +429,13 @@ fn try_extract_credentials(data: &str) -> Option<(String, String)> {
     }
 
     // Pattern 2: null-byte separated segments (binary SSH userauth).
+    // Skip known SSH protocol keywords that appear as segments.
+    const SSH_KEYWORDS: &[&str] = &[
+        "ssh-userauth", "ssh-connection", "keyboard-interactive",
+        "publickey", "password", "none", "ssh-rsa", "ssh-ed25519",
+    ];
     let segments: Vec<&str> = data.split('\x00').collect();
     if segments.len() >= 2 {
-        // Walk through segments looking for two consecutive printable strings.
         for pair in segments.windows(2) {
             let u = pair[0].trim();
             let p = pair[1].trim();
@@ -305,6 +443,7 @@ fn try_extract_credentials(data: &str) -> Option<(String, String)> {
                 && !p.is_empty()
                 && u.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
                 && p.len() <= 256
+                && !SSH_KEYWORDS.contains(&u.to_lowercase().as_str())
             {
                 return Some((u.to_string(), p.to_string()));
             }
@@ -320,22 +459,28 @@ mod tests {
 
     #[test]
     fn test_default_banner() {
-        let hp = SshHoneypot::new(None);
+        let hp = SshHoneypot::new(None, false);
         assert_eq!(hp.banner, DEFAULT_BANNER);
     }
 
     #[test]
     fn test_custom_banner() {
-        let hp = SshHoneypot::new(Some("SSH-2.0-CustomSSH_1.0"));
+        let hp = SshHoneypot::new(Some("SSH-2.0-CustomSSH_1.0"), false);
         assert_eq!(hp.banner, "SSH-2.0-CustomSSH_1.0");
     }
 
     #[test]
     fn test_trait_methods() {
-        let hp = SshHoneypot::new(None);
+        let hp = SshHoneypot::new(None, false);
         assert_eq!(hp.name(), "ssh-honeypot");
         assert_eq!(hp.protocol(), "tcp");
         assert_eq!(hp.default_port(), 22);
+    }
+
+    #[test]
+    fn test_shell_enabled() {
+        let hp = SshHoneypot::new(None, true);
+        assert!(hp.shell_enabled);
     }
 
     #[test]
@@ -355,5 +500,12 @@ mod tests {
     fn test_extract_no_credentials() {
         assert_eq!(try_extract_credentials("SSH-2.0-libssh_0.9.6"), None);
         assert_eq!(try_extract_credentials(""), None);
+    }
+
+    #[test]
+    fn test_fake_command_output() {
+        assert_eq!(fake_command_output("whoami", "whoami"), "root\r\n");
+        assert!(fake_command_output("id", "id").contains("uid=0"));
+        assert!(fake_command_output("nonexistent", "nonexistent").contains("command not found"));
     }
 }

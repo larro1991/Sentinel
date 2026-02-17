@@ -29,8 +29,10 @@ const X224_CONNECTION_CONFIRM: &[u8] = &[
     0x00, 0x00,             // DST-REF
     0x00, 0x00,             // SRC-REF
     0x00,                   // Class 0
-    0x02, 0x00, 0x08, 0x00, // RDP Negotiation Response
-    0x00, 0x00, 0x00,       // Flags + selected protocol (0 = standard RDP)
+    0x02,                   // RDP Neg Response type
+    0x00,                   // Flags
+    0x08, 0x00,             // Length (8)
+    0x00, 0x00, 0x00, 0x00, // Selected protocol (0 = standard RDP)
 ];
 
 pub struct RdpHoneypot;

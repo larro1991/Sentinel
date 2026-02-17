@@ -55,6 +55,15 @@ enum Commands {
         #[arg(short, long)]
         config: String,
     },
+    /// Analyze watch event logs and produce a report
+    WatchReport {
+        /// Path to the NDJSON events file
+        #[arg(short, long)]
+        input: String,
+        /// Optional output path for HTML report
+        #[arg(short, long)]
+        output: Option<String>,
+    },
 }
 
 fn print_banner() {
@@ -134,6 +143,7 @@ async fn main() -> Result<()> {
         Commands::Recon { config } => cmd_recon(&config).await?,
         Commands::Scan { config } => cmd_scan(&config).await?,
         Commands::Watch { config } => cmd_watch(&config).await?,
+        Commands::WatchReport { input, output } => cmd_watch_report(&input, output.as_deref())?,
     }
 
     Ok(())
@@ -335,11 +345,47 @@ async fn cmd_watch(config_path: &str) -> Result<()> {
         .as_ref()
         .context("No 'watch' section found in engagement config")?;
 
-    let engine = watch::engine::WatchEngine::from_config(watch_config)
+    let scope = Some((&config.scope, &config.authorization));
+
+    let engine = watch::engine::WatchEngine::from_config(watch_config, scope)
         .await
         .context("Failed to initialize watch engine")?;
 
     engine.run().await
+}
+
+fn cmd_watch_report(input_path: &str, output_path: Option<&str>) -> Result<()> {
+    let path = Path::new(input_path);
+    println!(
+        "{} {}",
+        "Loading events from:".bold(),
+        input_path,
+    );
+
+    let events = watch::report::load_jsonl(path)
+        .context("Failed to load watch events")?;
+
+    println!(
+        "{} {} events loaded",
+        "Loaded:".green().bold(),
+        events.len(),
+    );
+
+    let data = watch::report::analyze_events(&events);
+    watch::report::print_console_report(&data);
+
+    if let Some(out) = output_path {
+        let out_path = Path::new(out);
+        watch::report::generate_html_report(&data, out_path)
+            .context("Failed to generate HTML report")?;
+        println!(
+            "{} HTML report written to {}",
+            "Generated:".green().bold(),
+            out,
+        );
+    }
+
+    Ok(())
 }
 
 async fn cmd_scan(config_path: &str) -> Result<()> {

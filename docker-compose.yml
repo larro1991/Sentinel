@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  sentinel-watch:
+    build: .
+    container_name: sentinel-watch
+    restart: unless-stopped
+    ports:
+      # SSH honeypot
+      - "2222:22"
+      # SMTP honeypot
+      - "2525:25"
+      # FTP honeypot
+      - "2121:2121"
+      # Telnet honeypot
+      - "2323:2323"
+      # MySQL honeypot
+      - "3306:3306"
+      # RDP honeypot
+      - "3389:3389"
+      # DNS honeypot (UDP)
+      - "5353:5353/udp"
+      # PostgreSQL honeypot
+      - "5432:5432"
+      # HTTP honeypot
+      - "8080:8080"
+      # Dashboard
+      - "9090:9090"
+    volumes:
+      - ./config:/config:ro
+      - ./results:/results
+    environment:
+      - RUST_LOG=info
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
