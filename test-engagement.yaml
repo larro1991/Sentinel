@@ -1,0 +1,20 @@
+# Test engagement against scanme.nmap.org
+# This host is explicitly provided by nmap.org for scanner testing:
+# https://nmap.org/book/legal-issues.html
+
+id: "test-001"
+name: "Sentinel Validation Test - scanme.nmap.org"
+
+scope:
+  targets:
+    - "scanme.nmap.org"
+  exclusions: []
+  time_windows: []
+
+authorization:
+  max_level: "scanning"
+  auto_approve_up_to: "scanning"
+
+rate_limit_per_second: 10
+emergency_contact: "larry@localhost"
+output_dir: "./test-results"
