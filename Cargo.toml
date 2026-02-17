@@ -1,0 +1,53 @@
+[package]
+name = "sentinel"
+version = "0.1.0"
+edition = "2021"
+authors = ["Larry Roberts"]
+description = "Security assessment scanner with scope enforcement and professional reporting"
+license = "MIT"
+repository = "https://github.com/larro1991/Sentinel"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Time & networking
+chrono = { version = "0.4", features = ["serde"] }
+ipnet = { version = "2", features = ["serde"] }
+
+# DNS resolution
+hickory-resolver = "0.24"
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# TLS inspection
+tokio-rustls = "0.26"
+rustls = "0.23"
+webpki-roots = "0.26"
+x509-parser = "0.16"
+rustls-pki-types = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Crypto & IDs
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+
+# Output formatting
+colored = "2"

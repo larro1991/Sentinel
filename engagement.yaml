@@ -1,0 +1,28 @@
+# Sentinel Engagement Configuration
+# Copy and modify this file for each security assessment
+
+id: "engagement-001"
+name: "Q1 2026 Security Assessment - Example Corp"
+
+scope:
+  targets:
+    - "10.0.0.0/24"
+    - "192.168.1.0/24"
+    - "example.com"
+    - "*.example.com"
+  exclusions:
+    - "10.0.0.1/32"
+    - "10.0.0.2/32"
+  time_windows:
+    - start: "09:00"
+      end: "17:00"
+      days: ["Mon", "Tue", "Wed", "Thu", "Fri"]
+
+authorization:
+  max_level: "scanning"
+  auto_approve_up_to: "scanning"
+
+rate_limit_per_second: 100
+emergency_contact: "security-team@example.com"
+roe_document: "./rules-of-engagement.pdf"
+output_dir: "./results"
