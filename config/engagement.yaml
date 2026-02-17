@@ -1,0 +1,127 @@
+# Sentinel Engagement Configuration
+# Copy and modify this file for each security assessment
+
+id: "engagement-001"
+name: "Q1 2026 Security Assessment - Example Corp"
+
+scope:
+  targets:
+    - "10.0.0.0/24"
+    - "192.168.1.0/24"
+    - "example.com"
+    - "*.example.com"
+  exclusions:
+    - "10.0.0.1/32"
+    - "10.0.0.2/32"
+  time_windows:
+    - start: "09:00"
+      end: "17:00"
+      days: ["Mon", "Tue", "Wed", "Thu", "Fri"]
+
+authorization:
+  max_level: "scanning"
+  auto_approve_up_to: "scanning"
+
+rate_limit_per_second: 100
+emergency_contact: "security-team@example.com"
+roe_document: "./rules-of-engagement.pdf"
+output_dir: "./results"
+
+# Port scan configuration (optional)
+# Profiles: "quick" (32 ports), "standard" (100), "thorough" (~1000), "custom"
+port_scan:
+  profile: "standard"
+  # ports: [22, 80, 443]    # only used with profile: "custom"
+  # timeout_ms: 2000
+  # concurrency: 100
+
+# Module selection (optional — omit to run all modules)
+# modules:
+#   recon:
+#     - dns-enum
+#     - port-scan
+#     - service-probe
+#   vuln:
+#     - ssl-tls-check
+#     - http-headers-check
+#     - ssh-version-check
+#     - smb-signing-check
+#     - default-creds-check
+#     - dir-enum-check
+#     - snmp-community-check
+
+# Report formats (optional — omit to generate all)
+# report_formats: ["markdown", "json", "html", "csv", "sarif"]
+
+# Watch mode (honeypot / passive defense)
+watch:
+  bind_address: "0.0.0.0"
+  alert_file: "./results/watch-events.jsonl"
+
+  # Scope filter — tag events from IPs outside engagement scope
+  scope_filter:
+    action: "tag"
+
+  # Per-source-IP rate limiting
+  rate_limit:
+    max_events_per_ip: 100
+    window_secs: 60
+
+  # GeoIP enrichment
+  geoip:
+    provider: "ip-api"
+    cache_size: 10000
+
+  # Live dashboard
+  dashboard:
+    port: 9090
+    bind_address: "0.0.0.0"
+
+  # Log file rotation
+  log_rotation:
+    max_size_bytes: 52428800   # 50 MiB
+    max_files: 10
+
+  # Webhook alerts (uncomment and configure as needed)
+  # webhooks:
+  #   - url: "https://hooks.slack.com/services/xxx/yyy/zzz"
+  #     name: "slack"
+  #     min_severity: "High"
+
+  services:
+    # Original 6 listeners
+    - protocol: ssh
+      port: 2222
+      enabled: true
+      banner: "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4"
+      options:
+        shell_enabled: "true"
+    - protocol: http
+      port: 8888
+      enabled: true
+    - protocol: smb
+      port: 4445
+      enabled: true
+    - protocol: ftp
+      port: 2121
+      enabled: true
+    - protocol: telnet
+      port: 2323
+      enabled: true
+    - protocol: rdp
+      port: 3389
+      enabled: true
+
+    # New 4 listeners
+    - protocol: smtp
+      port: 2525
+      enabled: true
+    - protocol: dns
+      port: 5354
+      enabled: true
+    - protocol: mysql
+      port: 3307
+      enabled: true
+    - protocol: postgres
+      port: 5433
+      enabled: true

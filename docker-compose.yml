@@ -7,23 +7,25 @@ services:
     restart: unless-stopped
     ports:
       # SSH honeypot
-      - "2222:22"
+      - "2222:2222"
       # SMTP honeypot
-      - "2525:25"
+      - "2525:2525"
       # FTP honeypot
       - "2121:2121"
       # Telnet honeypot
       - "2323:2323"
       # MySQL honeypot
-      - "3306:3306"
+      - "3307:3307"
       # RDP honeypot
       - "3389:3389"
+      # SMB honeypot
+      - "4445:4445"
       # DNS honeypot (UDP)
-      - "5353:5353/udp"
+      - "5354:5354/udp"
       # PostgreSQL honeypot
-      - "5432:5432"
+      - "5433:5433"
       # HTTP honeypot
-      - "8080:8080"
+      - "8888:8888"
       # Dashboard
       - "9090:9090"
     volumes:
