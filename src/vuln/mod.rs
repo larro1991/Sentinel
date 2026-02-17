@@ -8,6 +8,10 @@ use crate::finding::Finding;
 pub mod ssl;
 pub mod headers;
 pub mod ssh;
+pub mod smb;
+pub mod default_creds;
+pub mod dir_enum;
+pub mod snmp;
 
 /// A discovered network service that vulnerability checks can be run against.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,5 +52,9 @@ pub fn default_checks() -> Vec<Box<dyn VulnCheck>> {
         Box::new(ssl::SslCheck::new()),
         Box::new(headers::HeaderCheck::new()),
         Box::new(ssh::SshCheck::new()),
+        Box::new(smb::SmbCheck::new()),
+        Box::new(default_creds::DefaultCredsCheck::new()),
+        Box::new(dir_enum::DirEnumCheck::new()),
+        Box::new(snmp::SnmpCheck::new()),
     ]
 }

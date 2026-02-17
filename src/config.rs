@@ -13,6 +13,43 @@ pub struct EngagementConfig {
     /// Path to the Rules of Engagement document.
     pub roe_document: Option<String>,
     pub output_dir: String,
+    /// Module selection — which recon and vuln modules to run.
+    /// If omitted, all modules are enabled.
+    #[serde(default)]
+    pub modules: Option<ModuleConfig>,
+    /// Port scan configuration.
+    #[serde(default)]
+    pub port_scan: Option<PortScanConfig>,
+    /// Report output formats. If omitted, all formats are generated.
+    #[serde(default)]
+    pub report_formats: Option<Vec<String>>,
+}
+
+/// Controls which modules are enabled for the engagement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleConfig {
+    /// Recon module names to enable. If omitted, all recon modules run.
+    pub recon: Option<Vec<String>>,
+    /// Vuln check names to enable. If omitted, all vuln checks run.
+    pub vuln: Option<Vec<String>>,
+}
+
+/// Port scan configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortScanConfig {
+    /// Port profile: "quick" (32 ports), "standard" (100 ports), "thorough" (1000 ports), or "custom".
+    #[serde(default = "default_port_profile")]
+    pub profile: String,
+    /// Custom port list (used when profile is "custom").
+    pub ports: Option<Vec<u16>>,
+    /// Connection timeout in milliseconds.
+    pub timeout_ms: Option<u64>,
+    /// Max concurrent connections.
+    pub concurrency: Option<usize>,
+}
+
+fn default_port_profile() -> String {
+    "quick".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

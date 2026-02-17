@@ -174,6 +174,10 @@ impl ReportGenerator for MarkdownReport {
         report.push_str("| ssl-tls-check | Vulnerability | TLS certificate and configuration analysis |\n");
         report.push_str("| http-headers-check | Vulnerability | HTTP security header analysis |\n");
         report.push_str("| ssh-version-check | Vulnerability | SSH version and protocol analysis |\n");
+        report.push_str("| smb-signing-check | Vulnerability | SMB signing configuration analysis |\n");
+        report.push_str("| default-creds-check | Vulnerability | Default credential detection |\n");
+        report.push_str("| dir-enum-check | Vulnerability | Sensitive path and file enumeration |\n");
+        report.push_str("| snmp-community-check | Vulnerability | SNMP community string detection |\n");
         report.push_str("\n");
 
         // Scope

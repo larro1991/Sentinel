@@ -26,3 +26,29 @@ rate_limit_per_second: 100
 emergency_contact: "security-team@example.com"
 roe_document: "./rules-of-engagement.pdf"
 output_dir: "./results"
+
+# Port scan configuration (optional)
+# Profiles: "quick" (32 ports), "standard" (100), "thorough" (~1000), "custom"
+port_scan:
+  profile: "standard"
+  # ports: [22, 80, 443]    # only used with profile: "custom"
+  # timeout_ms: 2000
+  # concurrency: 100
+
+# Module selection (optional — omit to run all modules)
+# modules:
+#   recon:
+#     - dns-enum
+#     - port-scan
+#     - service-probe
+#   vuln:
+#     - ssl-tls-check
+#     - http-headers-check
+#     - ssh-version-check
+#     - smb-signing-check
+#     - default-creds-check
+#     - dir-enum-check
+#     - snmp-community-check
+
+# Report formats (optional — omit to generate all)
+# report_formats: ["markdown", "json", "html", "csv", "sarif"]

@@ -71,11 +71,31 @@ pub trait ReconModule: Send + Sync {
     async fn execute(&self, target: &str) -> Result<ReconResult>;
 }
 
-/// Get all built-in recon modules.
+/// Get all built-in recon modules with default settings.
 pub fn default_modules() -> Vec<Box<dyn ReconModule>> {
     vec![
         Box::new(dns::DnsEnumerator::new()),
         Box::new(ports::PortScanner::new()),
+        Box::new(service::ServiceProber::new()),
+    ]
+}
+
+/// Build recon modules using engagement config (applies port scan profile).
+pub fn build_modules(config: &crate::config::EngagementConfig) -> Vec<Box<dyn ReconModule>> {
+    let scanner = if let Some(ref ps_config) = config.port_scan {
+        ports::PortScanner::from_profile(
+            &ps_config.profile,
+            ps_config.ports.as_deref(),
+            ps_config.timeout_ms,
+            ps_config.concurrency,
+        )
+    } else {
+        ports::PortScanner::new()
+    };
+
+    vec![
+        Box::new(dns::DnsEnumerator::new()),
+        Box::new(scanner),
         Box::new(service::ServiceProber::new()),
     ]
 }

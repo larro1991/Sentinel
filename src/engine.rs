@@ -1,8 +1,13 @@
+use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
+use tokio::time::{sleep, Duration};
 
 use crate::config::EngagementConfig;
 use crate::finding::FindingsManager;
@@ -31,6 +36,33 @@ pub struct EngagementResult {
     pub completed_at: DateTime<Utc>,
 }
 
+/// Simple token-bucket rate limiter.
+struct RateLimiter {
+    semaphore: Arc<Semaphore>,
+    rate_per_sec: u32,
+}
+
+impl RateLimiter {
+    fn new(rate_per_sec: u32) -> Self {
+        let permits = rate_per_sec.max(1) as usize;
+        Self {
+            semaphore: Arc::new(Semaphore::new(permits)),
+            rate_per_sec,
+        }
+    }
+
+    /// Acquire a rate-limit token. Blocks until one is available.
+    async fn acquire(&self) {
+        let permit = self.semaphore.clone().acquire_owned().await.unwrap();
+        let delay = Duration::from_secs_f64(1.0 / self.rate_per_sec as f64);
+        // Release the permit after the rate window.
+        tokio::spawn(async move {
+            sleep(delay).await;
+            drop(permit);
+        });
+    }
+}
+
 /// The engagement execution engine coordinates recon, vulnerability scanning,
 /// and reporting across all in-scope targets.
 pub struct Engine {
@@ -42,6 +74,7 @@ pub struct Engine {
     vuln_modules: Vec<Box<dyn VulnCheck>>,
     emergency_stopped: bool,
     recon_results: Vec<ReconResult>,
+    rate_limiter: Option<RateLimiter>,
 }
 
 impl Engine {
@@ -52,6 +85,8 @@ impl Engine {
         let scope = ScopeValidator::new(&config.scope, &config.authorization)
             .map_err(|e| anyhow::anyhow!("Scope validation setup failed: {}", e))?;
 
+        let rate_limiter = config.rate_limit_per_second.map(RateLimiter::new);
+
         Ok(Self {
             config,
             scope,
@@ -61,6 +96,7 @@ impl Engine {
             vuln_modules: Vec::new(),
             emergency_stopped: false,
             recon_results: Vec::new(),
+            rate_limiter,
         })
     }
 
@@ -76,6 +112,39 @@ impl Engine {
         self.vuln_modules.push(module);
     }
 
+    /// Expand CIDR ranges in the target list into individual IP addresses.
+    /// Hostnames pass through unchanged. CIDR ranges larger than /16 are skipped.
+    fn expand_targets(targets: &[String]) -> Vec<String> {
+        let mut expanded = Vec::new();
+        for target in targets {
+            if let Ok(net) = target.parse::<IpNet>() {
+                // Only expand if the range is reasonable (max /16 = 65536 hosts).
+                let host_count = net.hosts().count();
+                if host_count > 65536 {
+                    tracing::warn!(
+                        "CIDR range {} has {} hosts (> 65536), scanning network as-is",
+                        target, host_count
+                    );
+                    expanded.push(target.clone());
+                } else if host_count > 1 {
+                    tracing::info!("Expanding CIDR {} -> {} hosts", target, host_count);
+                    for addr in net.hosts() {
+                        expanded.push(addr.to_string());
+                    }
+                } else {
+                    // Single IP in CIDR notation.
+                    expanded.push(net.addr().to_string());
+                }
+            } else if let Ok(addr) = target.parse::<IpAddr>() {
+                expanded.push(addr.to_string());
+            } else {
+                // Hostname — pass through.
+                expanded.push(target.clone());
+            }
+        }
+        expanded
+    }
+
     /// Run the full engagement: recon -> vuln scan -> results.
     pub async fn run(&mut self) -> Result<EngagementResult> {
         let start_time = Instant::now();
@@ -86,22 +155,28 @@ impl Engine {
             self.config.name,
             self.config.id
         );
-        tracing::info!("Targets: {:?}", self.config.scope.targets);
+
+        // Expand CIDR targets.
+        let expanded_targets = Self::expand_targets(&self.config.scope.targets);
+        tracing::info!("Targets: {} ({} expanded)", self.config.scope.targets.len(), expanded_targets.len());
         tracing::info!(
             "Authorization level: {}",
             self.config.authorization.max_level
         );
+        if let Some(ref rl) = self.rate_limiter {
+            tracing::info!("Rate limit: {} ops/sec", rl.rate_per_sec);
+        }
 
         // Validate time window before starting.
         if let Err(e) = self.scope.validate_time() {
             bail!("Cannot start engagement: {}", e);
         }
 
-        // Phase 1: Recon
+        // Phase 1: Recon (runs against expanded targets)
         self.phase = EnginePhase::Recon;
         tracing::info!("--- Phase: Reconnaissance ---");
 
-        if let Err(e) = self.run_recon().await {
+        if let Err(e) = self.run_recon_targets(&expanded_targets).await {
             tracing::error!("Recon phase encountered errors: {}", e);
         }
 
@@ -135,11 +210,18 @@ impl Engine {
         Ok(self.build_result(start_time, started_at))
     }
 
-    /// Execute each recon module against each target.
+    /// Execute each recon module against each target (uses config targets).
     pub async fn run_recon(&mut self) -> Result<()> {
         let targets = self.config.scope.targets.clone();
+        self.run_recon_targets(&targets).await
+    }
 
-        for target in &targets {
+    /// Execute each recon module against the given target list.
+    async fn run_recon_targets(&mut self, targets: &[String]) -> Result<()> {
+        // Get enabled recon modules from config.
+        let enabled_recon = self.config.modules.as_ref().and_then(|m| m.recon.as_ref());
+
+        for target in targets {
             if self.emergency_stopped {
                 tracing::warn!("Emergency stop -- skipping remaining targets");
                 break;
@@ -162,6 +244,13 @@ impl Engine {
                 let auth_level = self.recon_modules[i].authorization_level();
                 let module_name = self.recon_modules[i].name().to_string();
 
+                // Check if this module is enabled in config.
+                if let Some(enabled) = enabled_recon {
+                    if !enabled.iter().any(|e| e == &module_name) {
+                        continue;
+                    }
+                }
+
                 // Validate authorization for this module.
                 if let Err(e) = self.scope.validate_authorization(auth_level) {
                     tracing::warn!(
@@ -171,6 +260,11 @@ impl Engine {
                         e
                     );
                     continue;
+                }
+
+                // Rate limit if configured.
+                if let Some(ref limiter) = self.rate_limiter {
+                    limiter.acquire().await;
                 }
 
                 tracing::info!(
@@ -205,6 +299,9 @@ impl Engine {
 
     /// Execute each vulnerability check against discovered services.
     pub async fn run_vulns(&mut self, services: &[Service]) -> Result<()> {
+        // Get enabled vuln modules from config.
+        let enabled_vuln = self.config.modules.as_ref().and_then(|m| m.vuln.as_ref());
+
         for service in services {
             if self.emergency_stopped {
                 tracing::warn!("Emergency stop -- skipping remaining services");
@@ -239,6 +336,13 @@ impl Engine {
                 let auth_level = self.vuln_modules[i].authorization_level();
                 let check_name = self.vuln_modules[i].name().to_string();
 
+                // Check if this module is enabled in config.
+                if let Some(enabled) = enabled_vuln {
+                    if !enabled.iter().any(|e| e == &check_name) {
+                        continue;
+                    }
+                }
+
                 // Validate authorization.
                 if let Err(e) = self.scope.validate_authorization(auth_level) {
                     tracing::warn!(
@@ -248,6 +352,11 @@ impl Engine {
                         e
                     );
                     continue;
+                }
+
+                // Rate limit if configured.
+                if let Some(ref limiter) = self.rate_limiter {
+                    limiter.acquire().await;
                 }
 
                 tracing::info!(

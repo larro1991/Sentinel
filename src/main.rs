@@ -160,8 +160,8 @@ async fn cmd_run(config_path: &str) -> Result<()> {
 
     let mut engine = Engine::new(config.clone())?;
 
-    // Register all default modules.
-    for module in recon::default_modules() {
+    // Register recon modules (with port scan config if present).
+    for module in recon::build_modules(&config) {
         engine.register_recon(module);
     }
     for check in vuln::default_checks() {
@@ -190,9 +190,15 @@ async fn cmd_run(config_path: &str) -> Result<()> {
         result.phase_reached
     );
 
-    // Generate reports.
+    // Generate reports (filtered by config if specified).
     let output_dir = Path::new(&config.output_dir);
-    for generator in report::default_generators() {
+    let enabled_formats = config.report_formats.as_ref();
+    for generator in report::all_generators() {
+        if let Some(formats) = enabled_formats {
+            if !formats.iter().any(|f| f == generator.format_name()) {
+                continue;
+            }
+        }
         match generator.generate(&config, engine.results(), output_dir) {
             Ok(path) => {
                 println!(
@@ -271,7 +277,7 @@ async fn cmd_recon(config_path: &str) -> Result<()> {
     let mut engine = Engine::new(config.clone())?;
 
     // Register recon modules only.
-    for module in recon::default_modules() {
+    for module in recon::build_modules(&config) {
         engine.register_recon(module);
     }
 
@@ -336,7 +342,7 @@ async fn cmd_scan(config_path: &str) -> Result<()> {
         );
         // Run a quick recon.
         let mut engine = Engine::new(config.clone())?;
-        for module in recon::default_modules() {
+        for module in recon::build_modules(&config) {
             engine.register_recon(module);
         }
         engine.run_recon().await?;
@@ -397,8 +403,14 @@ async fn cmd_scan(config_path: &str) -> Result<()> {
 
     print_findings_summary(&engine);
 
-    // Generate reports.
-    for generator in report::default_generators() {
+    // Generate reports (filtered by config if specified).
+    let enabled_formats = config.report_formats.as_ref();
+    for generator in report::all_generators() {
+        if let Some(formats) = enabled_formats {
+            if !formats.iter().any(|f| f == generator.format_name()) {
+                continue;
+            }
+        }
         match generator.generate(&config, engine.results(), output_dir) {
             Ok(path) => {
                 println!(
