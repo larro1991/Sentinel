@@ -57,11 +57,45 @@ port_scan:
 watch:
   bind_address: "0.0.0.0"
   alert_file: "./results/watch-events.jsonl"
+
+  # Scope filter — tag events from IPs outside engagement scope
+  scope_filter:
+    action: "tag"
+
+  # Per-source-IP rate limiting
+  rate_limit:
+    max_events_per_ip: 100
+    window_secs: 60
+
+  # GeoIP enrichment
+  geoip:
+    provider: "ip-api"
+    cache_size: 10000
+
+  # Live dashboard
+  dashboard:
+    port: 9090
+    bind_address: "0.0.0.0"
+
+  # Log file rotation
+  log_rotation:
+    max_size_bytes: 52428800   # 50 MiB
+    max_files: 10
+
+  # Webhook alerts (uncomment and configure as needed)
+  # webhooks:
+  #   - url: "https://hooks.slack.com/services/xxx/yyy/zzz"
+  #     name: "slack"
+  #     min_severity: "High"
+
   services:
+    # Original 6 listeners
     - protocol: ssh
       port: 2222
       enabled: true
       banner: "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4"
+      options:
+        shell_enabled: "true"
     - protocol: http
       port: 8888
       enabled: true
@@ -76,4 +110,18 @@ watch:
       enabled: true
     - protocol: rdp
       port: 3389
+      enabled: true
+
+    # New 4 listeners
+    - protocol: smtp
+      port: 2525
+      enabled: true
+    - protocol: dns
+      port: 5354
+      enabled: true
+    - protocol: mysql
+      port: 3307
+      enabled: true
+    - protocol: postgres
+      port: 5433
       enabled: true
