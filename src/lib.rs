@@ -6,3 +6,4 @@ pub mod engine;
 pub mod recon;
 pub mod vuln;
 pub mod report;
+pub mod watch;

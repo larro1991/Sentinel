@@ -23,6 +23,9 @@ pub struct EngagementConfig {
     /// Report output formats. If omitted, all formats are generated.
     #[serde(default)]
     pub report_formats: Option<Vec<String>>,
+    /// Watch mode (honeypot / passive defense) configuration.
+    #[serde(default)]
+    pub watch: Option<WatchConfig>,
 }
 
 /// Controls which modules are enabled for the engagement.
@@ -128,4 +131,41 @@ impl EngagementConfig {
 
         Ok(())
     }
+}
+
+// ── Watch Mode Configuration ──────────────────────────────────────────────────
+
+/// Top-level watch mode configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchConfig {
+    /// Address to bind all listeners on, e.g. "0.0.0.0".
+    #[serde(default = "default_bind_address")]
+    pub bind_address: String,
+    /// Path to the NDJSON alert file. Defaults to "./results/watch-events.jsonl".
+    pub alert_file: Option<String>,
+    /// List of honeypot services to run.
+    #[serde(default)]
+    pub services: Vec<WatchServiceConfig>,
+}
+
+fn default_bind_address() -> String {
+    "0.0.0.0".to_string()
+}
+
+/// Configuration for a single honeypot service.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchServiceConfig {
+    /// Protocol identifier: "ssh", "http", "smb", "ftp", "telnet", "rdp".
+    pub protocol: String,
+    /// TCP port to listen on.
+    pub port: u16,
+    /// Whether this listener is active.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    /// Optional custom banner string (used by ssh, ftp).
+    pub banner: Option<String>,
+}
+
+fn default_enabled() -> bool {
+    true
 }

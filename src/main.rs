@@ -10,6 +10,7 @@ use sentinel::finding::Severity;
 use sentinel::recon;
 use sentinel::report;
 use sentinel::vuln;
+use sentinel::watch;
 
 #[derive(Parser)]
 #[command(
@@ -44,6 +45,12 @@ enum Commands {
     },
     /// Run vulnerability checks only (requires previous recon results)
     Scan {
+        /// Path to engagement YAML config
+        #[arg(short, long)]
+        config: String,
+    },
+    /// Run honeypot/passive defense listeners
+    Watch {
         /// Path to engagement YAML config
         #[arg(short, long)]
         config: String,
@@ -126,6 +133,7 @@ async fn main() -> Result<()> {
         Commands::Validate { config } => cmd_validate(&config)?,
         Commands::Recon { config } => cmd_recon(&config).await?,
         Commands::Scan { config } => cmd_scan(&config).await?,
+        Commands::Watch { config } => cmd_watch(&config).await?,
     }
 
     Ok(())
@@ -316,6 +324,22 @@ async fn cmd_recon(config_path: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn cmd_watch(config_path: &str) -> Result<()> {
+    let config = EngagementConfig::load(config_path)
+        .context("Failed to load engagement config")?;
+
+    let watch_config = config
+        .watch
+        .as_ref()
+        .context("No 'watch' section found in engagement config")?;
+
+    let engine = watch::engine::WatchEngine::from_config(watch_config)
+        .await
+        .context("Failed to initialize watch engine")?;
+
+    engine.run().await
 }
 
 async fn cmd_scan(config_path: &str) -> Result<()> {
