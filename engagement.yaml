@@ -52,3 +52,28 @@ port_scan:
 
 # Report formats (optional — omit to generate all)
 # report_formats: ["markdown", "json", "html", "csv", "sarif"]
+
+# Watch mode (honeypot / passive defense)
+watch:
+  bind_address: "0.0.0.0"
+  alert_file: "./results/watch-events.jsonl"
+  services:
+    - protocol: ssh
+      port: 2222
+      enabled: true
+      banner: "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4"
+    - protocol: http
+      port: 8888
+      enabled: true
+    - protocol: smb
+      port: 4445
+      enabled: true
+    - protocol: ftp
+      port: 2121
+      enabled: true
+    - protocol: telnet
+      port: 2323
+      enabled: true
+    - protocol: rdp
+      port: 3389
+      enabled: true
