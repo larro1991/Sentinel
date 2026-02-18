@@ -30,9 +30,12 @@ services:
       - "8443:8443"
       # Dashboard
       - "9090:9090"
+      # REST API
+      - "9091:9091"
     volumes:
       - ./config:/config:ro
       - ./results:/results
+      - ./data:/data
     environment:
       - RUST_LOG=info
     cap_drop:

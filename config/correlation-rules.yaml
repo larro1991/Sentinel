@@ -1,0 +1,31 @@
+- name: "port-scan"
+  description: "Detects port scanning: many unique destination ports from one IP"
+  severity: "High"
+  rule_type:
+    type: port_scan
+    threshold: 5
+    window_secs: 60
+
+- name: "brute-force"
+  description: "Detects brute force: many credential attempts from one IP"
+  severity: "High"
+  rule_type:
+    type: brute_force
+    threshold: 10
+    window_secs: 300
+
+- name: "lateral-movement"
+  description: "Detects lateral movement: one IP hitting many different listeners"
+  severity: "Critical"
+  rule_type:
+    type: lateral_movement
+    threshold: 3
+    window_secs: 600
+
+- name: "event-flood"
+  description: "Detects event flooding: high volume of events from one IP"
+  severity: "Medium"
+  rule_type:
+    type: event_flood
+    threshold: 50
+    window_secs: 60

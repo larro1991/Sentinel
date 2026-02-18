@@ -64,6 +64,21 @@ enum Commands {
         #[arg(short, long)]
         output: Option<String>,
     },
+    /// Start standalone REST API server for querying an existing SQLite database
+    Serve {
+        /// Path to engagement YAML config
+        #[arg(short, long)]
+        config: Option<String>,
+        /// Path to the SQLite database file
+        #[arg(short, long)]
+        database: String,
+        /// Port to listen on (default: 9091)
+        #[arg(short, long, default_value = "9091")]
+        port: u16,
+        /// Bind address (default: 0.0.0.0)
+        #[arg(short, long, default_value = "0.0.0.0")]
+        bind: String,
+    },
 }
 
 fn print_banner() {
@@ -144,6 +159,9 @@ async fn main() -> Result<()> {
         Commands::Scan { config } => cmd_scan(&config).await?,
         Commands::Watch { config } => cmd_watch(&config).await?,
         Commands::WatchReport { input, output } => cmd_watch_report(&input, output.as_deref())?,
+        Commands::Serve { config: _, database, port, bind } => {
+            cmd_serve(&database, &bind, port).await?
+        }
     }
 
     Ok(())
@@ -386,6 +404,32 @@ fn cmd_watch_report(input_path: &str, output_path: Option<&str>) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn cmd_serve(database: &str, bind: &str, port: u16) -> Result<()> {
+    println!(
+        "{} {} on {}:{}",
+        "Starting API server".bold(),
+        database,
+        bind,
+        port,
+    );
+
+    let store = sentinel::store::EventStore::open(database)
+        .await
+        .context("Failed to open SQLite database")?;
+
+    let state = sentinel::api::ApiState { store };
+
+    println!(
+        "{} http://{}:{}/health",
+        "Health check:".dimmed(),
+        bind,
+        port,
+    );
+    println!("{}", "Press Ctrl+C to stop.".dimmed());
+
+    sentinel::api::serve(bind, port, state).await
 }
 
 async fn cmd_scan(config_path: &str) -> Result<()> {

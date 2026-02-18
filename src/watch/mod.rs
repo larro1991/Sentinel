@@ -1,5 +1,7 @@
 pub mod alert;
+pub mod correlation;
 pub mod dashboard;
+pub mod dedup;
 pub mod dns;
 pub mod engine;
 pub mod ftp;
@@ -12,6 +14,7 @@ pub mod rdp;
 pub mod report;
 pub mod smb;
 pub mod smtp;
+pub mod sqlite_sink;
 pub mod ssh;
 pub mod syslog;
 pub mod telnet;
@@ -104,6 +107,8 @@ pub struct WatchEvent {
     pub geo_asn: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub geo_org: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dedup_count: Option<u32>,
 }
 
 impl WatchEvent {
@@ -133,6 +138,7 @@ impl WatchEvent {
             geo_city: None,
             geo_asn: None,
             geo_org: None,
+            dedup_count: None,
         }
     }
 }

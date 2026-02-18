@@ -8,6 +8,7 @@ use crate::auth::AuthorizationLevel;
 pub mod dns;
 pub mod ports;
 pub mod service;
+pub mod subdomain;
 
 /// Result produced by a recon module.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +96,7 @@ pub fn build_modules(config: &crate::config::EngagementConfig) -> Vec<Box<dyn Re
 
     vec![
         Box::new(dns::DnsEnumerator::new()),
+        Box::new(subdomain::SubdomainEnumerator::new()),
         Box::new(scanner),
         Box::new(service::ServiceProber::new()),
     ]

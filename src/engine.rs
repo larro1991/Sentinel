@@ -184,6 +184,18 @@ impl Engine {
             return Ok(self.build_result(start_time, started_at));
         }
 
+        // Collect discovered subdomains and run further recon against them.
+        let subdomains = self.extract_subdomains();
+        if !subdomains.is_empty() {
+            tracing::info!(
+                "Discovered {} subdomains — running recon against them",
+                subdomains.len()
+            );
+            if let Err(e) = self.run_recon_targets(&subdomains).await {
+                tracing::error!("Subdomain recon phase encountered errors: {}", e);
+            }
+        }
+
         // Convert recon results into Service structs for vuln scanning.
         let services = self.extract_services();
         tracing::info!("Discovered {} services across all targets", services.len());
@@ -409,6 +421,24 @@ impl Engine {
     /// Get collected recon results.
     pub fn recon_results(&self) -> &[ReconResult] {
         &self.recon_results
+    }
+
+    /// Extract discovered subdomains from recon results.
+    fn extract_subdomains(&self) -> Vec<String> {
+        let mut subdomains = Vec::new();
+        for result in &self.recon_results {
+            if let ReconData::DnsRecords(records) = &result.data {
+                for record in records {
+                    if record.record_type == "SUBDOMAIN" && !record.value.is_empty() {
+                        // Use the subdomain name as the target.
+                        subdomains.push(record.name.clone());
+                    }
+                }
+            }
+        }
+        subdomains.sort();
+        subdomains.dedup();
+        subdomains
     }
 
     /// Extract Service structs from collected recon results.

@@ -103,6 +103,20 @@ watch:
   #   # host: "127.0.0.1"    # for UDP output
   #   # port: 514             # for UDP output
 
+  # SQLite database for event persistence
+  database: "./results/sentinel.db"
+
+  # Correlation rules YAML file
+  correlation_rules: "./config/correlation-rules.yaml"
+
+  # Event deduplication window (seconds)
+  dedup_window_secs: 30
+
+  # REST API server
+  api:
+    port: 9091
+    bind_address: "0.0.0.0"
+
   services:
     # Original 6 listeners
     - protocol: ssh

@@ -4,15 +4,19 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use colored::Colorize;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Mutex};
 
+use crate::api::{self, ApiState};
 use crate::config::{
     AuthorizationConfig, ScopeConfig, WatchConfig, WatchServiceConfig,
 };
 use crate::scope::ScopeValidator;
+use crate::store::EventStore;
 
 use super::alert::{AlertSink, ConsoleSink, JsonFileSink, RotatingJsonFileSink};
+use super::correlation::{self, CorrelatedAlert, CorrelationEngine};
 use super::dashboard::DashboardSink;
+use super::dedup::EventDeduplicator;
 use super::dns::DnsHoneypot;
 use super::ftp::FtpHoneypot;
 use super::geo::{GeoProvider, IpApiProvider};
@@ -23,6 +27,7 @@ use super::rate_limit::EventRateLimiter;
 use super::rdp::RdpHoneypot;
 use super::smb::SmbHoneypot;
 use super::smtp::SmtpHoneypot;
+use super::sqlite_sink::SqliteSink;
 use super::ssh::SshHoneypot;
 use super::syslog::SyslogSink;
 use super::telnet::TelnetHoneypot;
@@ -41,6 +46,9 @@ pub struct WatchEngine {
     geo_provider: Option<Arc<dyn GeoProvider>>,
     threat_intel_provider: Option<Arc<dyn ThreatIntelProvider>>,
     scope_action: String,
+    store: Option<EventStore>,
+    dedup_window_secs: Option<u64>,
+    correlation_rules_path: Option<String>,
 }
 
 impl WatchEngine {
@@ -132,6 +140,23 @@ impl WatchEngine {
             sinks.push(Arc::new(dashboard_sink));
         }
 
+        // SQLite event store + sink.
+        let store = if let Some(ref db_path) = config.database {
+            match EventStore::open(db_path).await {
+                Ok(store) => {
+                    sinks.push(Arc::new(SqliteSink::new(store.clone())));
+                    tracing::info!("SQLite event store opened: {}", db_path);
+                    Some(store)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to open SQLite store at {}: {}", db_path, e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Scope validator.
         let scope_validator = if let Some((scope_cfg, auth_cfg)) = scope {
             if config.scope_filter.is_some() {
@@ -188,6 +213,9 @@ impl WatchEngine {
             geo_provider,
             threat_intel_provider,
             scope_action,
+            store,
+            dedup_window_secs: config.dedup_window_secs,
+            correlation_rules_path: config.correlation_rules.clone(),
         })
     }
 
@@ -218,6 +246,91 @@ impl WatchEngine {
         // Drop the original sender so the channel can close after all listeners stop.
         drop(events_tx);
 
+        // Set up correlation engine.
+        let (corr_tx, mut corr_rx) = mpsc::unbounded_channel::<CorrelatedAlert>();
+        let rules = if let Some(ref path) = self.correlation_rules_path {
+            match correlation::load_rules(path) {
+                Ok(r) => {
+                    tracing::info!("Loaded {} correlation rules from {}", r.len(), path);
+                    r
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load correlation rules from {}: {} — using defaults", path, e);
+                    correlation::default_rules()
+                }
+            }
+        } else {
+            correlation::default_rules()
+        };
+        let correlation_engine = Arc::new(Mutex::new(CorrelationEngine::new(rules, corr_tx)));
+
+        // Set up deduplicator.
+        let deduplicator = self
+            .dedup_window_secs
+            .map(|secs| Arc::new(Mutex::new(EventDeduplicator::new(secs))));
+
+        // Spawn API server if configured.
+        if let Some(ref api_config) = self.config.api {
+            if let Some(ref store) = self.store {
+                let state = ApiState {
+                    store: store.clone(),
+                };
+                let bind = api_config.bind_address.clone();
+                let port = api_config.port;
+                tokio::spawn(async move {
+                    if let Err(e) = api::serve(&bind, port, state).await {
+                        tracing::error!("REST API server error: {}", e);
+                    }
+                });
+            }
+        }
+
+        // Spawn correlation alert consumer.
+        let store_for_corr = self.store.clone();
+        let corr_consumer = tokio::spawn(async move {
+            while let Some(alert) = corr_rx.recv().await {
+                tracing::warn!(
+                    "CORRELATION [{}] {} from {} — {} events",
+                    alert.severity.to_uppercase(),
+                    alert.rule_name,
+                    alert.source_ip,
+                    alert.count,
+                );
+                // Persist to SQLite if available.
+                if let Some(ref store) = store_for_corr {
+                    let row = crate::store::CorrelationRow {
+                        rule_name: alert.rule_name,
+                        severity: alert.severity,
+                        source_ip: alert.source_ip,
+                        trigger_event_ids: alert.trigger_event_ids,
+                        event_count: alert.count,
+                        window_start: alert.window_start.to_rfc3339(),
+                        window_end: alert.window_end.to_rfc3339(),
+                        created_at: alert.created_at.to_rfc3339(),
+                    };
+                    if let Err(e) = store.insert_correlation(&row).await {
+                        tracing::error!("Failed to persist correlation: {}", e);
+                    }
+                }
+            }
+        });
+
+        // Spawn periodic prune task for correlation engine.
+        let corr_engine_prune = correlation_engine.clone();
+        let mut shutdown_prune = shutdown_rx.clone();
+        let prune_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
+                        corr_engine_prune.lock().await.prune();
+                    }
+                    _ = shutdown_prune.changed() => {
+                        break;
+                    }
+                }
+            }
+        });
+
         let sinks = Arc::new(self.sinks);
         let scope_validator = self.scope_validator.clone();
         let rate_limiter = self.rate_limiter.clone();
@@ -227,6 +340,8 @@ impl WatchEngine {
 
         // Event dispatch loop with enrichment pipeline.
         let sinks_clone = sinks.clone();
+        let corr_engine = correlation_engine.clone();
+        let dedup = deduplicator.clone();
         let dispatch_handle = tokio::spawn(async move {
             while let Some(mut event) = events_rx.recv().await {
                 // 1. Scope filter
@@ -254,6 +369,15 @@ impl WatchEngine {
                             event.source_ip
                         );
                         continue;
+                    }
+                }
+
+                // 2.5. Deduplication
+                if let Some(ref dedup) = dedup {
+                    let result = dedup.lock().await.process(event.clone());
+                    match result {
+                        Some(deduped) => event = deduped,
+                        None => continue,
                     }
                 }
 
@@ -296,6 +420,9 @@ impl WatchEngine {
                         tracing::error!("[{}] Sink error: {}", sink.name(), e);
                     }
                 }
+
+                // 6. Correlation engine
+                corr_engine.lock().await.process(&event);
             }
         });
 
@@ -317,8 +444,26 @@ impl WatchEngine {
         for h in &handles {
             h.abort();
         }
+
+        // Flush deduplicator.
+        if let Some(ref dedup) = deduplicator {
+            let flushed = dedup.lock().await.flush();
+            if !flushed.is_empty() {
+                tracing::info!("Flushing {} accumulated dedup events", flushed.len());
+                for event in &flushed {
+                    for sink in sinks.iter() {
+                        let _ = sink.emit(event).await;
+                    }
+                }
+            }
+        }
+
         // Wait for dispatch to drain remaining events.
         let _ = dispatch_handle.await;
+
+        // Clean up background tasks.
+        prune_handle.abort();
+        corr_consumer.abort();
 
         let alert_path = self
             .config
@@ -330,6 +475,15 @@ impl WatchEngine {
             "Done.".green().bold(),
             alert_path,
         );
+
+        if self.store.is_some() {
+            let db_path = self.config.database.as_deref().unwrap_or("sentinel.db");
+            println!(
+                "{} Events persisted to {}",
+                "Done.".green().bold(),
+                db_path,
+            );
+        }
 
         Ok(())
     }
@@ -357,6 +511,24 @@ impl WatchEngine {
         }
         if self.threat_intel_provider.is_some() {
             println!("  {} Threat intelligence active", "●".green());
+        }
+        if self.store.is_some() {
+            println!("  {} SQLite persistence active", "●".green());
+        }
+        if self.dedup_window_secs.is_some() {
+            println!("  {} Event deduplication active", "●".green());
+        }
+        if self.correlation_rules_path.is_some() || self.store.is_some() {
+            println!("  {} Correlation engine active", "●".green());
+        }
+        if self.config.api.is_some() && self.store.is_some() {
+            let api = self.config.api.as_ref().unwrap();
+            println!(
+                "  {} REST API on http://{}:{}",
+                "●".green(),
+                api.bind_address,
+                api.port
+            );
         }
         println!("{}", "Active listeners:".bold());
         for (listener, addr) in &self.listeners {

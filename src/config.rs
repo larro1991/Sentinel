@@ -172,6 +172,37 @@ pub struct WatchConfig {
     /// Syslog/CEF export.
     #[serde(default)]
     pub syslog: Option<SyslogConfig>,
+    /// Path to the SQLite database for event persistence.
+    #[serde(default)]
+    pub database: Option<String>,
+    /// Path to correlation rules YAML file.
+    #[serde(default)]
+    pub correlation_rules: Option<String>,
+    /// REST API configuration.
+    #[serde(default)]
+    pub api: Option<ApiConfig>,
+    /// Deduplication time window in seconds.
+    #[serde(default)]
+    pub dedup_window_secs: Option<u64>,
+}
+
+/// REST API server configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiConfig {
+    /// Port for the API server (default: 9091).
+    #[serde(default = "default_api_port")]
+    pub port: u16,
+    /// Bind address for the API server (default: "0.0.0.0").
+    #[serde(default = "default_api_bind")]
+    pub bind_address: String,
+}
+
+fn default_api_port() -> u16 {
+    9091
+}
+
+fn default_api_bind() -> String {
+    "0.0.0.0".to_string()
 }
 
 fn default_bind_address() -> String {

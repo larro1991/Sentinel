@@ -12,6 +12,10 @@ pub mod smb;
 pub mod default_creds;
 pub mod dir_enum;
 pub mod snmp;
+pub mod cors;
+pub mod dns_zone_transfer;
+pub mod smtp_relay;
+pub mod tls_ciphers;
 
 /// A discovered network service that vulnerability checks can be run against.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,5 +60,9 @@ pub fn default_checks() -> Vec<Box<dyn VulnCheck>> {
         Box::new(default_creds::DefaultCredsCheck::new()),
         Box::new(dir_enum::DirEnumCheck::new()),
         Box::new(snmp::SnmpCheck::new()),
+        Box::new(cors::CorsCheck::new()),
+        Box::new(dns_zone_transfer::DnsZoneTransferCheck::new()),
+        Box::new(smtp_relay::SmtpRelayCheck::new()),
+        Box::new(tls_ciphers::TlsCipherCheck::new()),
     ]
 }

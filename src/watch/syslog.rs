@@ -192,6 +192,7 @@ mod tests {
             geo_city: None,
             geo_asn: None,
             geo_org: None,
+            dedup_count: None,
         }
     }
 
