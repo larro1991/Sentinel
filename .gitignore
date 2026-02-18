@@ -7,3 +7,7 @@ Cargo.lock
 .vscode/
 *.log
 results/
+test-results/
+*.db
+*.sqlite
+.env
