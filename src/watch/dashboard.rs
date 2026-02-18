@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -40,6 +41,8 @@ struct DashboardState {
     stats: Mutex<DashboardStats>,
     ip_counts: Mutex<HashMap<String, u64>>,
     sse_tx: broadcast::Sender<String>,
+    start_time: Instant,
+    listener_count: u32,
 }
 
 /// Dashboard alert sink — also serves a live web dashboard via embedded HTTP.
@@ -50,7 +53,7 @@ pub struct DashboardSink {
 }
 
 impl DashboardSink {
-    pub fn new(bind_address: &str, port: u16) -> Self {
+    pub fn new(bind_address: &str, port: u16, listener_count: u32) -> Self {
         let (sse_tx, _) = broadcast::channel(256);
         Self {
             bind_address: bind_address.to_string(),
@@ -60,6 +63,8 @@ impl DashboardSink {
                 stats: Mutex::new(DashboardStats::new()),
                 ip_counts: Mutex::new(HashMap::new()),
                 sse_tx,
+                start_time: Instant::now(),
+                listener_count,
             }),
         }
     }
@@ -179,6 +184,52 @@ async fn handle_http(
             let body = serde_json::to_string(&*stats)?;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body,
+            );
+            stream.write_all(response.as_bytes()).await?;
+        }
+        "/health" => {
+            let stats = state.stats.lock().await;
+            let uptime_secs = state.start_time.elapsed().as_secs();
+            let body = format!(
+                r#"{{"status":"ok","uptime_secs":{},"listeners":{},"total_events":{}}}"#,
+                uptime_secs, state.listener_count, stats.total_events,
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body,
+            );
+            stream.write_all(response.as_bytes()).await?;
+        }
+        "/api/metrics" => {
+            let stats = state.stats.lock().await;
+            let uptime_secs = state.start_time.elapsed().as_secs();
+
+            let mut body = String::new();
+            body.push_str("# HELP sentinel_watch_uptime_seconds Time since watch mode started\n");
+            body.push_str("# TYPE sentinel_watch_uptime_seconds gauge\n");
+            body.push_str(&format!("sentinel_watch_uptime_seconds {}\n", uptime_secs));
+            body.push_str("# HELP sentinel_watch_events_total Total events by listener\n");
+            body.push_str("# TYPE sentinel_watch_events_total counter\n");
+            for (listener, count) in &stats.events_by_listener {
+                body.push_str(&format!(
+                    "sentinel_watch_events_total{{listener=\"{}\"}} {}\n",
+                    listener, count,
+                ));
+            }
+            body.push_str("# HELP sentinel_watch_events_by_severity Total events by severity\n");
+            body.push_str("# TYPE sentinel_watch_events_by_severity counter\n");
+            for (severity, count) in &stats.events_by_severity {
+                body.push_str(&format!(
+                    "sentinel_watch_events_by_severity{{severity=\"{}\"}} {}\n",
+                    severity, count,
+                ));
+            }
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body,
             );

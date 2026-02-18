@@ -24,7 +24,10 @@ use super::rdp::RdpHoneypot;
 use super::smb::SmbHoneypot;
 use super::smtp::SmtpHoneypot;
 use super::ssh::SshHoneypot;
+use super::syslog::SyslogSink;
 use super::telnet::TelnetHoneypot;
+use super::threat_intel::{AbuseIpDbProvider, ThreatIntelProvider};
+use super::tls::TlsHoneypot;
 use super::webhook::WebhookSink;
 use super::{WatchEvent, WatchListener};
 
@@ -36,6 +39,7 @@ pub struct WatchEngine {
     scope_validator: Option<Arc<ScopeValidator>>,
     rate_limiter: Option<Arc<EventRateLimiter>>,
     geo_provider: Option<Arc<dyn GeoProvider>>,
+    threat_intel_provider: Option<Arc<dyn ThreatIntelProvider>>,
     scope_action: String,
 }
 
@@ -93,11 +97,37 @@ impl WatchEngine {
             sinks.push(Arc::new(webhook_sink));
         }
 
+        // Syslog sink.
+        if let Some(ref syslog_config) = config.syslog {
+            match syslog_config.output.as_str() {
+                "udp" => {
+                    let host = syslog_config.host.as_deref().unwrap_or("127.0.0.1");
+                    let port = syslog_config.port.unwrap_or(514);
+                    match SyslogSink::new_udp(host, port).await {
+                        Ok(sink) => sinks.push(Arc::new(sink)),
+                        Err(e) => tracing::warn!("Failed to initialize syslog UDP sink: {}", e),
+                    }
+                }
+                _ => {
+                    let path = syslog_config
+                        .path
+                        .as_deref()
+                        .unwrap_or("./results/watch-events.cef");
+                    match SyslogSink::new_file(std::path::Path::new(path)).await {
+                        Ok(sink) => sinks.push(Arc::new(sink)),
+                        Err(e) => tracing::warn!("Failed to initialize syslog file sink: {}", e),
+                    }
+                }
+            }
+        }
+
         // Dashboard sink.
+        let listener_count = listeners.len() as u32;
         if let Some(ref dash_config) = config.dashboard {
             let dashboard_sink = DashboardSink::new(
                 &dash_config.bind_address,
                 dash_config.port,
+                listener_count,
             );
             sinks.push(Arc::new(dashboard_sink));
         }
@@ -138,6 +168,17 @@ impl WatchEngine {
             Arc::new(IpApiProvider::new(geo.cache_size)) as Arc<dyn GeoProvider>
         });
 
+        // Threat intelligence provider.
+        let threat_intel_provider: Option<Arc<dyn ThreatIntelProvider>> =
+            config.threat_intel.as_ref().and_then(|ti| {
+                if !ti.enabled || ti.api_key.is_empty() {
+                    None
+                } else {
+                    Some(Arc::new(AbuseIpDbProvider::new(&ti.api_key, ti.cache_size))
+                        as Arc<dyn ThreatIntelProvider>)
+                }
+            });
+
         Ok(Self {
             config: config.clone(),
             listeners,
@@ -145,6 +186,7 @@ impl WatchEngine {
             scope_validator,
             rate_limiter,
             geo_provider,
+            threat_intel_provider,
             scope_action,
         })
     }
@@ -180,6 +222,7 @@ impl WatchEngine {
         let scope_validator = self.scope_validator.clone();
         let rate_limiter = self.rate_limiter.clone();
         let geo_provider = self.geo_provider.clone();
+        let threat_intel_provider = self.threat_intel_provider.clone();
         let scope_action = self.scope_action.clone();
 
         // Event dispatch loop with enrichment pipeline.
@@ -225,7 +268,29 @@ impl WatchEngine {
                     }
                 }
 
-                // 4. Dispatch to all sinks
+                // 4. Threat intelligence enrichment
+                if let Some(ref ti) = threat_intel_provider {
+                    if let Ok(info) = ti.lookup(&event.source_ip).await {
+                        if let Some(score) = info.abuse_score {
+                            event
+                                .details
+                                .insert("threat_score".to_string(), score.to_string());
+                        }
+                        if info.is_malicious {
+                            event
+                                .details
+                                .insert("threat_malicious".to_string(), "true".to_string());
+                        }
+                        if !info.threat_categories.is_empty() {
+                            event.details.insert(
+                                "threat_categories".to_string(),
+                                info.threat_categories.join(", "),
+                            );
+                        }
+                    }
+                }
+
+                // 5. Dispatch to all sinks
                 for sink in sinks_clone.iter() {
                     if let Err(e) = sink.emit(&event).await {
                         tracing::error!("[{}] Sink error: {}", sink.name(), e);
@@ -290,6 +355,9 @@ impl WatchEngine {
         if self.geo_provider.is_some() {
             println!("  {} GeoIP enrichment active", "●".green());
         }
+        if self.threat_intel_provider.is_some() {
+            println!("  {} Threat intelligence active", "●".green());
+        }
         println!("{}", "Active listeners:".bold());
         for (listener, addr) in &self.listeners {
             println!(
@@ -328,6 +396,7 @@ fn build_listener(svc: &WatchServiceConfig) -> Result<Box<dyn WatchListener>> {
         "dns" => Ok(Box::new(DnsHoneypot::new())),
         "mysql" => Ok(Box::new(MysqlHoneypot::new())),
         "postgres" => Ok(Box::new(PostgresHoneypot::new())),
+        "tls" => Ok(Box::new(TlsHoneypot::new())),
         other => anyhow::bail!("Unknown watch service protocol: {}", other),
     }
 }

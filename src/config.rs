@@ -166,6 +166,12 @@ pub struct WatchConfig {
     /// Log file rotation settings.
     #[serde(default)]
     pub log_rotation: Option<LogRotationConfig>,
+    /// Threat intelligence enrichment.
+    #[serde(default)]
+    pub threat_intel: Option<ThreatIntelConfig>,
+    /// Syslog/CEF export.
+    #[serde(default)]
+    pub syslog: Option<SyslogConfig>,
 }
 
 fn default_bind_address() -> String {
@@ -300,4 +306,54 @@ fn default_max_size_bytes() -> u64 {
 
 fn default_max_files() -> u32 {
     10
+}
+
+/// Threat intelligence enrichment configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreatIntelConfig {
+    /// Whether threat intel enrichment is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Provider: "abuseipdb" (default).
+    #[serde(default = "default_threat_intel_provider")]
+    pub provider: String,
+    /// API key for the provider.
+    #[serde(default)]
+    pub api_key: String,
+    /// Maximum number of cached lookups.
+    #[serde(default = "default_threat_intel_cache_size")]
+    pub cache_size: usize,
+}
+
+fn default_threat_intel_provider() -> String {
+    "abuseipdb".to_string()
+}
+
+fn default_threat_intel_cache_size() -> usize {
+    5_000
+}
+
+/// Syslog / CEF export configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyslogConfig {
+    /// Output format: "cef" (default).
+    #[serde(default = "default_syslog_format")]
+    pub format: String,
+    /// Output mode: "file" or "udp".
+    #[serde(default = "default_syslog_output")]
+    pub output: String,
+    /// File path (used when output is "file").
+    pub path: Option<String>,
+    /// Remote syslog host (used when output is "udp").
+    pub host: Option<String>,
+    /// Remote syslog port (used when output is "udp").
+    pub port: Option<u16>,
+}
+
+fn default_syslog_format() -> String {
+    "cef".to_string()
+}
+
+fn default_syslog_output() -> String {
+    "file".to_string()
 }

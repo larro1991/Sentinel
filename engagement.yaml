@@ -88,6 +88,21 @@ watch:
   #     name: "slack"
   #     min_severity: "High"
 
+  # Threat intelligence enrichment (requires AbuseIPDB API key)
+  # threat_intel:
+  #   enabled: true
+  #   provider: "abuseipdb"
+  #   api_key: "YOUR_ABUSEIPDB_API_KEY"
+  #   cache_size: 5000
+
+  # Syslog / CEF export
+  # syslog:
+  #   format: "cef"
+  #   output: "file"          # "file" or "udp"
+  #   path: "./results/watch-events.cef"
+  #   # host: "127.0.0.1"    # for UDP output
+  #   # port: 514             # for UDP output
+
   services:
     # Original 6 listeners
     - protocol: ssh
@@ -124,4 +139,9 @@ watch:
       enabled: true
     - protocol: postgres
       port: 5433
+      enabled: true
+
+    # TLS honeypot
+    - protocol: tls
+      port: 8443
       enabled: true

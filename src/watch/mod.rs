@@ -13,7 +13,10 @@ pub mod report;
 pub mod smb;
 pub mod smtp;
 pub mod ssh;
+pub mod syslog;
 pub mod telnet;
+pub mod threat_intel;
+pub mod tls;
 pub mod webhook;
 
 use std::collections::HashMap;
