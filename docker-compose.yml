@@ -26,6 +26,8 @@ services:
       - "5433:5433"
       # HTTP honeypot
       - "8888:8888"
+      # TLS honeypot
+      - "8443:8443"
       # Dashboard
       - "9090:9090"
     volumes:

@@ -26,7 +26,7 @@ COPY --from=builder /build/target/release/sentinel /usr/local/bin/sentinel
 RUN mkdir -p /config /results && chown sentinel:sentinel /results
 
 # Honeypot ports + dashboard.
-EXPOSE 22 25 80 443 2121 2323 3306 3389 5353/udp 5432 8080 9090
+EXPOSE 22 25 80 443 2121 2323 3306 3389 5353/udp 5432 8080 8443 9090
 
 VOLUME ["/config", "/results"]
 
