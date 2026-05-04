@@ -9,6 +9,8 @@ linux-firmware-none
 linux-firmware-intel
 linux-firmware-realtek
 linux-firmware-other
+linux-firmware-bnx2
+linux-firmware-brcm
 mkinitfs
 openrc
 busybox-suid
@@ -46,7 +48,7 @@ jq
 # Logging / debug visibility
 logrotate
 
-# Rescue toolkit (the whole point of the stick once you SSH in)
+# Rescue toolkit
 parted
 gptfdisk
 dosfstools
@@ -78,3 +80,17 @@ which
 curl
 wget
 ca-certificates
+
+# TrueNAS / ZFS specific (userland only — no kernel module in MVP)
+zfs
+zfs-extra
+
+# Server hardware tools (BMC, IPMI — common on TrueNAS hardware)
+ipmitool
+
+# Proxmox migration prep tools
+debootstrap
+qemu-img
+
+# Python3 for sentry-agent (UAI bridge)
+python3

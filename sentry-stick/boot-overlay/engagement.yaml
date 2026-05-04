@@ -1,54 +1,59 @@
-# Sentry engagement configuration.
-# Schema mirrors Sentinel's engagement.yaml; subset used by sentry-init.
+# Sentry engagement configuration — TrueNAS server (192.168.110.185)
 # Edit on any laptop (this partition mounts as FAT32 on Win/Mac/Linux).
+# After editing: safely eject and plug into server.
 
-id:   "sentry-lab-001"
-name: "Bootable SSH lifeline (default)"
+id:   "truenas-recovery-001"
+name: "TrueNAS server headless recovery — Proxmox migration"
 
 scope:
-  # Only operate when the box's IP falls inside one of these subnets.
-  # MVP: scope is informational only (logged, not enforced).
   allowed_subnets:
-    - "192.168.0.0/16"
-    - "10.0.0.0/8"
-    - "172.16.0.0/12"
+    - "192.168.110.0/24"
   excluded_subnets: []
 
-  # Block-device scope. The boot USB itself is auto-added to excluded_devices
-  # at boot — you cannot accidentally wipe the stick you booted from.
+  # Allow all block devices EXCEPT the boot USB itself (auto-excluded).
+  # TrueNAS boot SSD likely /dev/sda or /dev/nvme0n1 — both listed.
+  # Data drives also listed so ZFS pool inspection works.
   allowed_devices:
     - "/dev/sda"
     - "/dev/sda*"
+    - "/dev/sdb"
+    - "/dev/sdb*"
+    - "/dev/sdc"
+    - "/dev/sdc*"
+    - "/dev/sdd"
+    - "/dev/sdd*"
     - "/dev/nvme0n1"
     - "/dev/nvme0n1p*"
+    - "/dev/nvme1n1"
+    - "/dev/nvme1n1p*"
   excluded_devices: []
 
-  # Time-window enforcement is logged but not enforced in MVP.
   time_windows:
     - { start: "00:00", end: "23:59",
         days: ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"] }
 
 authorization:
-  # Two rungs implemented in MVP:
-  #   passive  — restricted shell, read-only inspection commands
-  #   scanning — full bash; mount/mkfs/parted/dd/etc. via `sudo sentry-exec`
   max_level:          "scanning"
   auto_approve_up_to: "scanning"
 
 network:
+  # ASUS TUF B550-PLUS has Realtek 2.5Gb NIC — likely enp4s0 or eth0
+  # If SSH doesn't come up, try the verbose boot option and check dmesg for NIC name.
   interface: "eth0"
-  mode:      "dhcp"          # only dhcp supported in MVP
-  hostname:  "sentry"
+  mode:      "dhcp"
+  hostname:  "truenas-rescue"
 
 ssh:
   port:         22
   bind_address: "0.0.0.0"
-  banner:       "Sentry — authorized access only. All sessions are recorded."
-  # Public keys come from /authorized_keys on this same partition,
-  # one key per line. Lines starting with # are ignored.
+  banner:       "TrueNAS rescue — larro authorized access. Sessions recorded."
 
 audit:
-  # Where boot logs, shell recordings, sudo logs, sentry-exec decisions go.
-  # This is on P3 (sentry-state ext4) — survives reboots until you wipe P3.
   output_dir: "/var/lib/sentry/logs"
   formats:    ["jsonl", "typescript"]
+
+# UAI integration — sentry-agent registers to this broker on boot.
+# Set to GamingPC IP where UAI broker (:7700) runs.
+uai:
+  broker: "192.168.110.XXX:7700"   # CHANGE to GamingPC LAN IP before flashing
+  agent_port: 7800

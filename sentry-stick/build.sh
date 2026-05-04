@@ -110,7 +110,9 @@ rsync -a "$WORK/rootfs-overlay/" "$P2_MNT/"
 chmod 0755 "$P2_MNT/sbin/sentry-init" \
            "$P2_MNT/sbin/sentry-exec" \
            "$P2_MNT/usr/local/bin/sentry-rsh" \
-           "$P2_MNT/etc/init.d/sentry-init"
+           "$P2_MNT/usr/local/bin/sentry-agent" \
+           "$P2_MNT/etc/init.d/sentry-init" \
+           "$P2_MNT/etc/init.d/sentry-agent"
 chmod 0440 "$P2_MNT/etc/sudoers.d/sentry"
 chmod 0644 "$P2_MNT/etc/profile.d/sentry-record.sh"
 chmod 0644 "$P2_MNT/etc/ssh/sshd_config.template"
@@ -159,6 +161,7 @@ rc-update add bootmisc     boot
 rc-update add syslog       boot
 rc-update add sentry-init  boot
 rc-update add sshd         default
+rc-update add sentry-agent default
 rc-update add chronyd      default
 rc-update add avahi-daemon default
 rc-update add crond        default

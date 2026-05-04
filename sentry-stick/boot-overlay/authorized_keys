@@ -5,5 +5,4 @@
 #
 # Until at least one valid key is added here, SSH will refuse all logins.
 #
-# Example:
-# ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...example...== operator@laptop
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPkGcfwFFRzidQCBjtVkRw2zrF2OyQVCyWFlCuKUwQym larro@GamingPC

@@ -1,0 +1,24 @@
+#!/sbin/openrc-run
+
+description="Sentry UAI agent — hardware control bridge"
+command="/usr/bin/python3"
+command_args="/usr/local/bin/sentry-agent"
+command_background=true
+pidfile="/run/sentry-agent.pid"
+output_log="/var/lib/sentry/logs/sentry-agent.log"
+error_log="/var/lib/sentry/logs/sentry-agent.log"
+
+depend() {
+    after sentry-init
+    after sshd
+    need net
+}
+
+start_pre() {
+    # Read UAI_BROKER from engagement.yaml if yq is available
+    if command -v yq >/dev/null 2>&1 && [ -r /boot/cfg/engagement.yaml ]; then
+        broker=$(yq -r '.uai.broker // ""' /boot/cfg/engagement.yaml 2>/dev/null)
+        [ -n "$broker" ] && export UAI_BROKER="$broker"
+    fi
+    return 0
+}

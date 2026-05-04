@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""
+sentry-agent: UAI bridge running inside the Alpine rescue environment.
+
+Starts at boot (after sentry-init). Registers with the UAI broker on the
+home network, then serves a lightweight HTTP API so UAI can control this
+machine at hardware level.
+
+Port: 7800
+No auth (protected by the engagement.yaml SSH key + LAN-only binding).
+"""
+
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.request import urlopen, Request
+from urllib.error import URLError
+
+# ── config ────────────────────────────────────────────────────────────────────
+UAI_BROKER    = os.environ.get("UAI_BROKER",    "192.168.110.XXX:7700")  # GamingPC — set in engagement.yaml or env
+AGENT_PORT    = int(os.environ.get("SENTRY_AGENT_PORT", "7800"))
+ENGAGEMENT    = "/boot/cfg/engagement.yaml"
+LEVEL_FILE    = "/etc/sentry/auth.level"
+BOOT_ID_FILE  = "/run/sentry-boot-id"
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _sh(cmd, timeout=15):
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        return r.stdout.strip()
+    except Exception as e:
+        return f"ERROR: {e}"
+
+def _hostname():
+    try:
+        with open("/etc/hostname") as f:
+            return f.read().strip()
+    except Exception:
+        return socket.gethostname()
+
+def _my_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "unknown"
+
+def _auth_level():
+    try:
+        return open(LEVEL_FILE).read().strip()
+    except Exception:
+        return "passive"
+
+def _disks():
+    out = _sh("lsblk -J -o NAME,SIZE,TYPE,MOUNTPOINT,LABEL,FSTYPE,MODEL 2>/dev/null")
+    try:
+        return json.loads(out).get("blockdevices", [])
+    except Exception:
+        return []
+
+def _smart(device):
+    return _sh(f"smartctl -H -i {device} 2>/dev/null")
+
+def _boot_envs():
+    """Parse efibootmgr output into a list of boot entries."""
+    out = _sh("efibootmgr -v 2>/dev/null")
+    entries = []
+    for line in out.splitlines():
+        if line.startswith("Boot") and "* " in line:
+            # Active entry: Boot0001* Windows Boot Manager   ...
+            parts = line.split("* ", 1)
+            num = parts[0].replace("Boot", "").strip()
+            name = parts[1].split("\t")[0].strip() if "\t" in parts[1] else parts[1][:40].strip()
+            entries.append({"id": num, "name": name, "active": True})
+        elif line.startswith("Boot") and line[8:9] == " ":
+            num = line[4:8]
+            name = line[9:50].strip()
+            entries.append({"id": num, "name": name, "active": False})
+    return entries
+
+def _full_state():
+    return {
+        "hostname":   _hostname(),
+        "ip":         _my_ip(),
+        "mode":       "rescue",
+        "auth_level": _auth_level(),
+        "uptime_sec": int(_sh("awk '{print int($1)}' /proc/uptime") or 0),
+        "cpu":        _sh("grep 'model name' /proc/cpuinfo | head -1 | cut -d: -f2").strip(),
+        "ram_mb":     int(_sh("awk '/MemTotal/{print int($2/1024)}' /proc/meminfo") or 0),
+        "kernel":     _sh("uname -r"),
+        "disks":      _disks(),
+        "boot_envs":  _boot_envs(),
+        "pci_summary": _sh("lspci 2>/dev/null | grep -iE 'VGA|SATA|NVMe|Ethernet|Network'"),
+        "network": {
+            "interface": _sh("ip -4 route show default | awk '/default/{print $5}' | head -1"),
+            "ip":        _my_ip(),
+            "gateway":   _sh("ip -4 route show default | awk '/default/{print $3}' | head -1"),
+        },
+    }
+
+# ── actions ───────────────────────────────────────────────────────────────────
+
+def _do_action(body):
+    action = body.get("action", "")
+    level  = _auth_level()
+
+    def need_scanning():
+        if level not in ("scanning",):
+            return {"ok": False, "error": f"action {action} requires scanning level, have {level}"}
+        return None
+
+    if action == "state":
+        return {"ok": True, "state": _full_state()}
+
+    elif action == "disk_list":
+        return {"ok": True, "disks": _disks()}
+
+    elif action == "smart":
+        device = body.get("device", "")
+        if not device:
+            return {"ok": False, "error": "missing device"}
+        return {"ok": True, "output": _smart(device)}
+
+    elif action == "boot_envs":
+        return {"ok": True, "boot_envs": _boot_envs()}
+
+    elif action == "run":
+        err = need_scanning()
+        if err:
+            return err
+        cmd = body.get("cmd", "")
+        if not cmd:
+            return {"ok": False, "error": "missing cmd"}
+        return {"ok": True, "output": _sh(cmd, timeout=30)}
+
+    elif action == "reboot_to_os":
+        # Find first non-sentry EFI boot entry and set as BootNext
+        entries = _boot_envs()
+        target = None
+        for e in entries:
+            n = e.get("name", "").lower()
+            if "sentry" not in n and e.get("active"):
+                target = e["id"]
+                break
+        if not target:
+            return {"ok": False, "error": "no non-sentry boot entry found"}
+        _sh(f"efibootmgr -n {target}")
+        threading.Timer(2.0, lambda: _sh("reboot")).start()
+        return {"ok": True, "message": f"rebooting to BootNext={target}"}
+
+    elif action == "reboot":
+        threading.Timer(2.0, lambda: _sh("reboot")).start()
+        return {"ok": True, "message": "rebooting in 2s"}
+
+    elif action == "poweroff":
+        threading.Timer(2.0, lambda: _sh("poweroff")).start()
+        return {"ok": True, "message": "powering off in 2s"}
+
+    elif action == "mount":
+        err = need_scanning()
+        if err:
+            return err
+        device = body.get("device", "")
+        mountpoint = body.get("mountpoint", "/mnt/host")
+        if not device:
+            return {"ok": False, "error": "missing device"}
+        _sh(f"mkdir -p {mountpoint}")
+        out = _sh(f"mount -o ro {device} {mountpoint} 2>&1")
+        return {"ok": "error" not in out.lower(), "output": out, "mountpoint": mountpoint}
+
+    elif action == "umount":
+        mountpoint = body.get("mountpoint", "/mnt/host")
+        out = _sh(f"umount {mountpoint} 2>&1")
+        return {"ok": True, "output": out}
+
+    else:
+        return {"ok": False, "error": f"unknown action: {action}"}
+
+# ── HTTP handler ──────────────────────────────────────────────────────────────
+
+class SentryHandler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass  # sentry-init already logs everything
+
+    def _respond(self, code, data):
+        body = json.dumps(data).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", len(body))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/state":
+            self._respond(200, _full_state())
+        elif self.path == "/health":
+            self._respond(200, {"ok": True, "hostname": _hostname()})
+        else:
+            self._respond(404, {"error": "not found"})
+
+    def do_POST(self):
+        if self.path == "/action":
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length)
+            try:
+                body = json.loads(raw)
+            except Exception:
+                self._respond(400, {"error": "invalid JSON"})
+                return
+            result = _do_action(body)
+            self._respond(200 if result.get("ok") else 400, result)
+        else:
+            self._respond(404, {"error": "not found"})
+
+# ── UAI broker registration ───────────────────────────────────────────────────
+
+def _register_to_broker(retries=12, delay=10):
+    """Register this machine with the UAI broker. Retries for ~2 min."""
+    payload = json.dumps({
+        "type":         "sentry",
+        "hostname":     _hostname(),
+        "ip":           _my_ip(),
+        "agent_port":   AGENT_PORT,
+        "capabilities": ["disk", "boot", "power", "os-probe", "smart"],
+        "mode":         "rescue",
+    }).encode()
+
+    for attempt in range(retries):
+        try:
+            req = Request(
+                f"http://{UAI_BROKER}/sentry/register",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(req, timeout=5) as resp:
+                body = resp.read()
+                print(f"[sentry-agent] registered to UAI broker: {body.decode()[:80]}")
+                return True
+        except Exception as e:
+            print(f"[sentry-agent] broker registration attempt {attempt+1}/{retries} failed: {e}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+    print("[sentry-agent] could not reach UAI broker — running standalone")
+    return False
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    print(f"[sentry-agent] starting on :{AGENT_PORT}")
+
+    # Async broker registration (don't block sshd start)
+    threading.Thread(target=_register_to_broker, daemon=True).start()
+
+    server = HTTPServer(("0.0.0.0", AGENT_PORT), SentryHandler)
+    print(f"[sentry-agent] listening on 0.0.0.0:{AGENT_PORT}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("[sentry-agent] stopping")
