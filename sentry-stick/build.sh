@@ -46,7 +46,10 @@ mkdir -p "$BUILD_DIR"
 P1_MNT=$BUILD_DIR/p1
 P2_MNT=$BUILD_DIR/p2
 P3_MNT=$BUILD_DIR/p3
-LOOP=""
+LOOP=""      # whole-disk loop (for grub-install)
+LOOP_P1=""   # offset loop for FAT32 partition
+LOOP_P2=""   # offset loop for rootfs ext4
+LOOP_P3=""   # offset loop for state ext4
 
 cleanup() {
     set +e
@@ -54,7 +57,10 @@ cleanup() {
              "$P1_MNT" "$P3_MNT" "$P2_MNT"; do
         mountpoint -q "$m" 2>/dev/null && umount -lf "$m"
     done
-    [ -n "$LOOP" ] && losetup -d "$LOOP" 2>/dev/null
+    [ -n "$LOOP_P1" ] && losetup -d "$LOOP_P1" 2>/dev/null
+    [ -n "$LOOP_P2" ] && losetup -d "$LOOP_P2" 2>/dev/null
+    [ -n "$LOOP_P3" ] && losetup -d "$LOOP_P3" 2>/dev/null
+    [ -n "$LOOP"    ] && losetup -d "$LOOP"    2>/dev/null
     info "(temp dir kept at $BUILD_DIR for inspection)"
 }
 trap cleanup EXIT
@@ -76,23 +82,38 @@ parted -s "$OUT_IMG" -- \
     mkpart sentry-state ext4  ${P2_END}MiB 100%
 parted -s "$OUT_IMG" print
 
-# --- 2. loop-mount -----------------------------------------------------------
-log "Attaching loop device"
-# util-linux losetup (installed in build container) supports --show -fP
-LOOP=$(losetup --show -fP "$OUT_IMG")
-sleep 1
-info "Loop: $LOOP (partitions: ${LOOP}p1 ${LOOP}p2 ${LOOP}p3)"
+# --- 2. loop-mount (offset-based — works in Docker Desktop on Windows) -------
+log "Attaching loop devices (offset-based, no partition scanning needed)"
+
+# Parse partition byte offsets from sfdisk JSON output
+eval "$(sfdisk -J "$OUT_IMG" | python3 -c "
+import json,sys
+pts=json.load(sys.stdin)['partitiontable']['partitions']
+s=512
+print('P1_OFF=%d P1_LEN=%d' % (pts[0]['start']*s, pts[0]['size']*s))
+print('P2_OFF=%d P2_LEN=%d' % (pts[1]['start']*s, pts[1]['size']*s))
+print('P3_OFF=%d P3_LEN=%d' % (pts[2]['start']*s, pts[2]['size']*s))
+")"
+
+LOOP=$(losetup --show -f "$OUT_IMG")
+LOOP_P1=$(losetup --show -f --offset "$P1_OFF" --sizelimit "$P1_LEN" "$OUT_IMG")
+LOOP_P2=$(losetup --show -f --offset "$P2_OFF" --sizelimit "$P2_LEN" "$OUT_IMG")
+LOOP_P3=$(losetup --show -f --offset "$P3_OFF" --sizelimit "$P3_LEN" "$OUT_IMG")
+info "Disk loop: $LOOP"
+info "P1 (ESP):   $LOOP_P1  offset=$P1_OFF size=$P1_LEN"
+info "P2 (root):  $LOOP_P2  offset=$P2_OFF size=$P2_LEN"
+info "P3 (state): $LOOP_P3  offset=$P3_OFF size=$P3_LEN"
 
 # --- 3. format ---------------------------------------------------------------
 log "Formatting partitions"
-mkfs.vfat -F32 -n SENTRYBOOT  "${LOOP}p1"
-mkfs.ext4 -F -L sentry-root   -O '^has_journal' "${LOOP}p2"  # smaller, fine for read-mostly
-mkfs.ext4 -F -L sentry-state                    "${LOOP}p3"
+mkfs.vfat -F32 -n SENTRYBOOT "$LOOP_P1"
+mkfs.ext4 -F -L sentry-root  -O '^has_journal' "$LOOP_P2"
+mkfs.ext4 -F -L sentry-state "$LOOP_P3"
 
 # --- 4. mount rootfs target --------------------------------------------------
 mkdir -p "$P1_MNT" "$P2_MNT" "$P3_MNT"
-mount "${LOOP}p2" "$P2_MNT"
-mount "${LOOP}p1" "$P1_MNT"
+mount "$LOOP_P2" "$P2_MNT"
+mount "$LOOP_P1" "$P1_MNT"
 
 # --- 5. bootstrap Alpine into rootfs ----------------------------------------
 log "Bootstrapping Alpine $ALPINE_VER into rootfs"
@@ -241,8 +262,10 @@ umount "$P2_MNT/proc"
 umount "$P2_MNT/sys"
 umount "$P1_MNT"
 umount "$P2_MNT"
-losetup -d "$LOOP"
-LOOP=
+losetup -d "$LOOP_P1" 2>/dev/null; LOOP_P1=
+losetup -d "$LOOP_P2" 2>/dev/null; LOOP_P2=
+losetup -d "$LOOP_P3" 2>/dev/null; LOOP_P3=
+losetup -d "$LOOP"    2>/dev/null; LOOP=
 
 log "Build complete: $OUT_IMG"
 ls -lh "$OUT_IMG"
