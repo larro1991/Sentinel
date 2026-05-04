@@ -83,7 +83,6 @@ ca-certificates
 
 # TrueNAS / ZFS specific (userland only — no kernel module in MVP)
 zfs
-zfs-extra
 
 # Server hardware tools (BMC, IPMI — common on TrueNAS hardware)
 ipmitool
