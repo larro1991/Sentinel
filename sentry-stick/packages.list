@@ -93,3 +93,4 @@ qemu-img
 
 # Python3 for sentry-agent (UAI bridge)
 python3
+py3-cryptography

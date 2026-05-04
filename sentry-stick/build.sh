@@ -135,6 +135,8 @@ chmod 0755 "$P2_MNT/sbin/sentry-init" \
            "$P2_MNT/usr/local/bin/sentry-agent" \
            "$P2_MNT/etc/init.d/sentry-init" \
            "$P2_MNT/etc/init.d/sentry-agent"
+chmod 0644 "$P2_MNT/usr/local/lib/sentry/__init__.py" \
+           "$P2_MNT/usr/local/lib/sentry/trust.py"
 chmod 0440 "$P2_MNT/etc/sudoers.d/sentry"
 chmod 0644 "$P2_MNT/etc/profile.d/sentry-record.sh"
 chmod 0644 "$P2_MNT/etc/ssh/sshd_config.template"
