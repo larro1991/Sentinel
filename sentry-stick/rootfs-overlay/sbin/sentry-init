@@ -83,10 +83,21 @@ fail_soft() {
 echo "[1] mounting boot partition (P1, FAT32, label=SENTRYBOOT)"
 mkdir -p "$P1_MOUNT"
 if ! mountpoint -q "$P1_MOUNT"; then
-    if ! mount -t vfat -o rw /dev/disk/by-label/SENTRYBOOT "$P1_MOUNT" 2>/dev/null; then
-        # Fallback: try by-partlabel
-        mount -o rw /dev/disk/by-partlabel/SENTRYBOOT "$P1_MOUNT" \
-            || fail_soft "could not mount SENTRYBOOT — engagement.yaml unreadable"
+    # USB storage enumeration can lag behind init. Retry for up to 15s.
+    mounted=0
+    for _try in 1 2 3 4 5; do
+        if mount -t vfat -o rw /dev/disk/by-label/SENTRYBOOT "$P1_MOUNT" 2>/dev/null; then
+            mounted=1; break
+        fi
+        # Fallback: by-partlabel
+        if mount -o rw /dev/disk/by-partlabel/SENTRYBOOT "$P1_MOUNT" 2>/dev/null; then
+            mounted=1; break
+        fi
+        echo "[1] SENTRYBOOT not found yet (attempt $_try/5) — waiting 3s for USB..."
+        sleep 3
+    done
+    if [ "$mounted" -eq 0 ]; then
+        fail_soft "could not mount SENTRYBOOT after 5 attempts — engagement.yaml unreadable"
     fi
 fi
 
@@ -264,7 +275,8 @@ passwd -d sentry >/dev/null 2>&1 || true
 mkdir -p /home/sentry/.ssh
 key_count=0
 if [ -r "$KEYS_FILE" ]; then
-    grep -vE '^\s*(#|$)' "$KEYS_FILE" > /home/sentry/.ssh/authorized_keys
+    # Strip comments, blank lines, and Windows CRLF (\r) before installing
+    grep -vE '^\s*(#|$)' "$KEYS_FILE" | tr -d '\r' > /home/sentry/.ssh/authorized_keys
     key_count=$(wc -l < /home/sentry/.ssh/authorized_keys)
 else
     : > /home/sentry/.ssh/authorized_keys
