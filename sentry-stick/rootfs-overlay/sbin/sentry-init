@@ -147,6 +147,8 @@ if [ -z "$yq" ] || [ ! -r "$CFG" ]; then
     MAX_LEVEL="passive"
     ALLOWED=""
     EXCLUDED=""
+    ALLOWED_SUBNETS=""
+    AUTH_TOKEN=""
 else
     ID=$($yq -r '.id // "sentry"'                              "$CFG")
     HOST=$($yq -r '.network.hostname // "sentry"'              "$CFG")
@@ -158,6 +160,8 @@ else
     MAX_LEVEL=$($yq -r '.authorization.max_level // "scanning"' "$CFG")
     ALLOWED=$($yq -r '.scope.allowed_devices[]? // ""'         "$CFG")
     EXCLUDED=$($yq -r '.scope.excluded_devices[]? // ""'       "$CFG")
+    ALLOWED_SUBNETS=$($yq -r '.scope.allowed_subnets[]? // ""' "$CFG")
+    AUTH_TOKEN=$($yq -r '.auth.token // ""'                    "$CFG")
 fi
 
 case "$MAX_LEVEL" in
@@ -191,6 +195,20 @@ echo "$MAX_LEVEL" > "$LEVEL_FILE"
     echo "EXCLUDED_DEVICES_FILE=$EXCLUDED_FILE"
 } > "$SCOPE_ENV"
 echo "$SSH_BANNER" > "$BANNER_FILE"
+
+# Write allowed_subnets for sentry-agent IP filtering
+{
+    [ -n "$ALLOWED_SUBNETS" ] && echo "$ALLOWED_SUBNETS"
+} > /etc/sentry/allowed_subnets
+
+# Write agent token (sentry-agent generates one if this file is empty)
+if [ -n "$AUTH_TOKEN" ]; then
+    echo "$AUTH_TOKEN" > /etc/sentry/agent.token
+    chmod 600 /etc/sentry/agent.token
+    echo "[4] agent token loaded from engagement.yaml"
+else
+    echo "[4] no auth.token in engagement.yaml — sentry-agent will auto-generate"
+fi
 
 # --- 5. hostname -----------------------------------------------------------
 echo "[5] setting hostname=$HOST"

@@ -7,11 +7,16 @@ home network, then serves a lightweight HTTP API so UAI can control this
 machine at hardware level.
 
 Port: 7800
-No auth (protected by the engagement.yaml SSH key + LAN-only binding).
+Auth: Bearer token (from /etc/sentry/agent.token, set by sentry-init from
+      engagement.yaml auth.token — or auto-generated and written to STATUS.TXT).
 """
 
+import hashlib
+import ipaddress
 import json
 import os
+import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -22,13 +27,107 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError
 
 # ── config ────────────────────────────────────────────────────────────────────
-UAI_BROKER    = os.environ.get("UAI_BROKER",    "192.168.110.XXX:7700")  # GamingPC — set in engagement.yaml or env
+UAI_BROKER    = os.environ.get("UAI_BROKER",    "")
 AGENT_PORT    = int(os.environ.get("SENTRY_AGENT_PORT", "7800"))
-ENGAGEMENT    = "/boot/cfg/engagement.yaml"
+TOKEN_FILE    = "/etc/sentry/agent.token"
 LEVEL_FILE    = "/etc/sentry/auth.level"
-BOOT_ID_FILE  = "/run/sentry-boot-id"
+ALLOWED_FILE  = "/etc/sentry/allowed_devices"
+EXCLUDED_FILE = "/etc/sentry/excluded_devices"
+SUBNET_FILE   = "/etc/sentry/allowed_subnets"   # written by sentry-init
+STATUS_FILE   = "/boot/cfg/STATUS.TXT"
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+# Commands permitted under the 'run' action (scanning level, read-only).
+# Arbitrary shell execution is NOT permitted — only these prefixes.
+_ALLOWED_RUN_CMDS = frozenset([
+    "lsblk", "blkid", "lscpu", "free", "df", "du", "lspci", "lsusb",
+    "dmidecode", "hdparm -I", "hdparm -C", "smartctl -H", "smartctl -i",
+    "smartctl -a", "smartctl -A", "smartctl -l",
+    "ip addr", "ip link", "ip route", "ip -4", "ip -6",
+    "ss -tulpn", "ss -s", "netstat",
+    "ps", "top -b -n1", "dmesg", "journalctl",
+    "ls", "cat /proc", "cat /sys", "cat /etc/os-release",
+    "uname", "hostname", "date", "uptime",
+    "efibootmgr", "nvme list", "nvme smart-log",
+    "mount", "findmnt", "stat",
+    "rc-status", "service", "openrc",
+])
+
+
+# ── auth helpers ──────────────────────────────────────────────────────────────
+
+def _load_token():
+    """Load bearer token from file, or generate+persist one."""
+    try:
+        tok = open(TOKEN_FILE).read().strip()
+        if tok:
+            return tok
+    except FileNotFoundError:
+        pass
+
+    # Auto-generate (engagement.yaml had no auth.token).
+    tok = secrets.token_hex(32)
+    os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+    with open(TOKEN_FILE, "w") as f:
+        f.write(tok + "\n")
+    os.chmod(TOKEN_FILE, 0o600)
+
+    # Append to STATUS.TXT so operator can read it off the FAT32 partition.
+    try:
+        with open(STATUS_FILE, "a") as f:
+            f.write(f"\n Agent token: {tok}\n (read from SENTRYBOOT/STATUS.TXT)\n")
+    except Exception:
+        pass
+
+    print(f"[sentry-agent] WARNING: no auth.token in engagement.yaml — "
+          f"auto-generated token written to {TOKEN_FILE} and STATUS.TXT")
+    return tok
+
+
+def _load_allowed_subnets():
+    subnets = []
+    try:
+        for line in open(SUBNET_FILE):
+            line = line.strip()
+            if line and not line.startswith("#"):
+                try:
+                    subnets.append(ipaddress.ip_network(line, strict=False))
+                except ValueError:
+                    pass
+    except FileNotFoundError:
+        pass
+    return subnets
+
+
+_TOKEN   = None   # loaded once at startup
+_SUBNETS = []     # loaded once at startup
+
+
+def _check_auth(handler):
+    """Return (ok:bool, error_msg:str). Checks IP + bearer token."""
+    client_ip = handler.client_address[0]
+
+    # IP allowlist (if configured — empty list = allow all LAN)
+    if _SUBNETS:
+        try:
+            addr = ipaddress.ip_address(client_ip)
+            if not any(addr in net for net in _SUBNETS):
+                return False, f"client IP {client_ip} not in allowed_subnets"
+        except ValueError:
+            return False, f"invalid client IP {client_ip}"
+
+    # Bearer token
+    auth_hdr = handler.headers.get("Authorization", "")
+    if not auth_hdr.startswith("Bearer "):
+        return False, "missing Authorization: Bearer header"
+    provided = auth_hdr[7:].strip()
+    # Constant-time compare to prevent timing attacks
+    if not secrets.compare_digest(provided, _TOKEN):
+        return False, "invalid token"
+
+    return True, ""
+
+
+# ── shell helpers ─────────────────────────────────────────────────────────────
 
 def _sh(cmd, timeout=15):
     try:
@@ -37,12 +136,24 @@ def _sh(cmd, timeout=15):
     except Exception as e:
         return f"ERROR: {e}"
 
+
+def _is_run_allowed(cmd):
+    """Check cmd against the allowlist (prefix match on normalized cmd)."""
+    cmd_stripped = cmd.strip().lstrip("/")
+    for allowed in _ALLOWED_RUN_CMDS:
+        if cmd_stripped == allowed or cmd_stripped.startswith(allowed + " "):
+            return True
+    return False
+
+
+# ── state helpers ─────────────────────────────────────────────────────────────
+
 def _hostname():
     try:
-        with open("/etc/hostname") as f:
-            return f.read().strip()
+        return open("/etc/hostname").read().strip()
     except Exception:
         return socket.gethostname()
+
 
 def _my_ip():
     try:
@@ -52,11 +163,13 @@ def _my_ip():
     except Exception:
         return "unknown"
 
+
 def _auth_level():
     try:
         return open(LEVEL_FILE).read().strip()
     except Exception:
         return "passive"
+
 
 def _disks():
     out = _sh("lsblk -J -o NAME,SIZE,TYPE,MOUNTPOINT,LABEL,FSTYPE,MODEL 2>/dev/null")
@@ -65,38 +178,42 @@ def _disks():
     except Exception:
         return []
 
+
 def _smart(device):
+    # Validate device path before passing to shell
+    if not re.match(r'^/dev/[a-z0-9]+$', device):
+        return "ERROR: invalid device path"
     return _sh(f"smartctl -H -i {device} 2>/dev/null")
 
+
 def _boot_envs():
-    """Parse efibootmgr output into a list of boot entries."""
     out = _sh("efibootmgr -v 2>/dev/null")
     entries = []
     for line in out.splitlines():
         if line.startswith("Boot") and "* " in line:
-            # Active entry: Boot0001* Windows Boot Manager   ...
             parts = line.split("* ", 1)
-            num = parts[0].replace("Boot", "").strip()
+            num  = parts[0].replace("Boot", "").strip()
             name = parts[1].split("\t")[0].strip() if "\t" in parts[1] else parts[1][:40].strip()
             entries.append({"id": num, "name": name, "active": True})
         elif line.startswith("Boot") and line[8:9] == " ":
-            num = line[4:8]
+            num  = line[4:8]
             name = line[9:50].strip()
             entries.append({"id": num, "name": name, "active": False})
     return entries
 
+
 def _full_state():
     return {
-        "hostname":   _hostname(),
-        "ip":         _my_ip(),
-        "mode":       "rescue",
-        "auth_level": _auth_level(),
-        "uptime_sec": int(_sh("awk '{print int($1)}' /proc/uptime") or 0),
-        "cpu":        _sh("grep 'model name' /proc/cpuinfo | head -1 | cut -d: -f2").strip(),
-        "ram_mb":     int(_sh("awk '/MemTotal/{print int($2/1024)}' /proc/meminfo") or 0),
-        "kernel":     _sh("uname -r"),
-        "disks":      _disks(),
-        "boot_envs":  _boot_envs(),
+        "hostname":    _hostname(),
+        "ip":          _my_ip(),
+        "mode":        "rescue",
+        "auth_level":  _auth_level(),
+        "uptime_sec":  int(_sh("awk '{print int($1)}' /proc/uptime") or 0),
+        "cpu":         _sh("grep 'model name' /proc/cpuinfo | head -1 | cut -d: -f2").strip(),
+        "ram_mb":      int(_sh("awk '/MemTotal/{print int($2/1024)}' /proc/meminfo") or 0),
+        "kernel":      _sh("uname -r"),
+        "disks":       _disks(),
+        "boot_envs":   _boot_envs(),
         "pci_summary": _sh("lspci 2>/dev/null | grep -iE 'VGA|SATA|NVMe|Ethernet|Network'"),
         "network": {
             "interface": _sh("ip -4 route show default | awk '/default/{print $5}' | head -1"),
@@ -104,6 +221,7 @@ def _full_state():
             "gateway":   _sh("ip -4 route show default | awk '/default/{print $3}' | head -1"),
         },
     }
+
 
 # ── actions ───────────────────────────────────────────────────────────────────
 
@@ -113,7 +231,7 @@ def _do_action(body):
 
     def need_scanning():
         if level not in ("scanning",):
-            return {"ok": False, "error": f"action {action} requires scanning level, have {level}"}
+            return {"ok": False, "error": f"action {action!r} requires scanning level, have {level!r}"}
         return None
 
     if action == "state":
@@ -138,10 +256,15 @@ def _do_action(body):
         cmd = body.get("cmd", "")
         if not cmd:
             return {"ok": False, "error": "missing cmd"}
+        if not _is_run_allowed(cmd):
+            return {
+                "ok": False,
+                "error": f"command not in allowlist: {cmd!r}",
+                "hint":  "only read-only diagnostic commands are permitted",
+            }
         return {"ok": True, "output": _sh(cmd, timeout=30)}
 
     elif action == "reboot_to_os":
-        # Find first non-sentry EFI boot entry and set as BootNext
         entries = _boot_envs()
         target = None
         for e in entries:
@@ -171,23 +294,32 @@ def _do_action(body):
         mountpoint = body.get("mountpoint", "/mnt/host")
         if not device:
             return {"ok": False, "error": "missing device"}
+        if not re.match(r'^/dev/[a-z0-9]+$', device):
+            return {"ok": False, "error": "invalid device path"}
+        if not re.match(r'^/mnt/[a-zA-Z0-9_-]+$', mountpoint):
+            return {"ok": False, "error": "invalid mountpoint — must be under /mnt/"}
         _sh(f"mkdir -p {mountpoint}")
         out = _sh(f"mount -o ro {device} {mountpoint} 2>&1")
         return {"ok": "error" not in out.lower(), "output": out, "mountpoint": mountpoint}
 
     elif action == "umount":
         mountpoint = body.get("mountpoint", "/mnt/host")
+        if not re.match(r'^/mnt/[a-zA-Z0-9_-]+$', mountpoint):
+            return {"ok": False, "error": "invalid mountpoint"}
         out = _sh(f"umount {mountpoint} 2>&1")
         return {"ok": True, "output": out}
 
     else:
-        return {"ok": False, "error": f"unknown action: {action}"}
+        return {"ok": False, "error": f"unknown action: {action!r}"}
+
 
 # ── HTTP handler ──────────────────────────────────────────────────────────────
 
 class SentryHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        pass  # sentry-init already logs everything
+        ts  = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        src = self.client_address[0]
+        print(f"[{ts}] {src} {fmt % args}")
 
     def _respond(self, code, data):
         body = json.dumps(data).encode()
@@ -197,15 +329,30 @@ class SentryHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _auth_or_reject(self):
+        """Returns True if request is authorized. Sends 401/403 and returns False otherwise."""
+        ok, msg = _check_auth(self)
+        if not ok:
+            code = 403 if "not in allowed_subnets" in msg else 401
+            self._respond(code, {"ok": False, "error": msg})
+            return False
+        return True
+
     def do_GET(self):
+        # /health is unauthenticated — for uptime monitoring only
+        if self.path == "/health":
+            self._respond(200, {"ok": True, "hostname": _hostname()})
+            return
+        if not self._auth_or_reject():
+            return
         if self.path == "/state":
             self._respond(200, _full_state())
-        elif self.path == "/health":
-            self._respond(200, {"ok": True, "hostname": _hostname()})
         else:
             self._respond(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self._auth_or_reject():
+            return
         if self.path == "/action":
             length = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(length)
@@ -219,15 +366,20 @@ class SentryHandler(BaseHTTPRequestHandler):
         else:
             self._respond(404, {"error": "not found"})
 
+
 # ── UAI broker registration ───────────────────────────────────────────────────
 
 def _register_to_broker(retries=12, delay=10):
-    """Register this machine with the UAI broker. Retries for ~2 min."""
+    if not UAI_BROKER:
+        print("[sentry-agent] no UAI_BROKER set — skipping registration")
+        return False
+
     payload = json.dumps({
         "type":         "sentry",
         "hostname":     _hostname(),
         "ip":           _my_ip(),
         "agent_port":   AGENT_PORT,
+        "token":        _TOKEN,   # broker needs the token to call us back
         "capabilities": ["disk", "boot", "power", "os-probe", "smart"],
         "mode":         "rescue",
     }).encode()
@@ -248,15 +400,22 @@ def _register_to_broker(retries=12, delay=10):
             print(f"[sentry-agent] broker registration attempt {attempt+1}/{retries} failed: {e}")
             if attempt < retries - 1:
                 time.sleep(delay)
-    print("[sentry-agent] could not reach UAI broker — running standalone")
+
+    print("[sentry-agent] could not reach UAI broker — running standalone (SSH still works)")
     return False
+
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    print(f"[sentry-agent] starting on :{AGENT_PORT}")
+    global _TOKEN, _SUBNETS
+    _TOKEN   = _load_token()
+    _SUBNETS = _load_allowed_subnets()
 
-    # Async broker registration (don't block sshd start)
+    print(f"[sentry-agent] starting on :{AGENT_PORT}")
+    print(f"[sentry-agent] auth: token loaded ({len(_TOKEN)} chars), "
+          f"subnets: {[str(s) for s in _SUBNETS] or 'any'}")
+
     threading.Thread(target=_register_to_broker, daemon=True).start()
 
     server = HTTPServer(("0.0.0.0", AGENT_PORT), SentryHandler)

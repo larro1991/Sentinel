@@ -54,6 +54,12 @@ audit:
 
 # UAI integration — sentry-agent registers to this broker on boot.
 # Set to GamingPC IP where UAI broker (:7700) runs.
+auth:
+  # Pre-shared token required on every sentry-agent API call (Bearer header).
+  # If omitted: auto-generated at boot and appended to STATUS.TXT on this partition.
+  # Generate with: python3 -c "import secrets; print(secrets.token_hex(32))"
+  token: ""   # set before deploying to a machine you don't physically control
+
 uai:
-  broker: "192.168.110.XXX:7700"   # CHANGE to GamingPC LAN IP before flashing
+  broker: "192.168.110.25:7700"
   agent_port: 7800
