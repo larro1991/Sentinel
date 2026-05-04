@@ -243,6 +243,8 @@ rsync -a "$WORK/boot-overlay/" "$P1_MNT/"
 # --- 9. install GRUB (UEFI, removable) --------------------------------------
 log "Installing GRUB (x86_64-efi, removable)"
 mkdir -p "$P1_MNT/EFI/BOOT" "$P1_MNT/grub"
+
+# Install GRUB modules/fonts/locale into $P1_MNT/grub/
 grub-install \
     --target=x86_64-efi \
     --efi-directory="$P1_MNT" \
@@ -252,7 +254,23 @@ grub-install \
     --modules="part_gpt fat ext2 search search_label normal linux echo configfile chain" \
     --recheck
 
-# Override grub.cfg with ours (grub-install writes a stub).
+# Replace BOOTX64.EFI with a custom image that has SENTRYBOOT label search
+# embedded in the core — works on any hardware regardless of disk number.
+# grub-install hardcodes the disk number; grub-mkimage with --config embeds it.
+cat > /tmp/grub-early.cfg <<'EARLYEOF'
+search --no-floppy --label --set=root SENTRYBOOT
+set prefix=($root)/grub
+EARLYEOF
+
+grub-mkimage \
+    --config=/tmp/grub-early.cfg \
+    --output="$P1_MNT/EFI/BOOT/BOOTX64.EFI" \
+    --format=x86_64-efi \
+    --prefix=/grub \
+    part_gpt fat ext2 search search_label normal linux echo configfile chain
+info "BOOTX64.EFI rebuilt with embedded SENTRYBOOT label search"
+
+# Install our grub.cfg (grub-install wrote a stub — overwrite it).
 cp -f "$WORK/boot-overlay/grub.cfg" "$P1_MNT/grub/grub.cfg"
 
 # --- 10. cleanup -------------------------------------------------------------
