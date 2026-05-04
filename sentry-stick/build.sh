@@ -78,15 +78,9 @@ parted -s "$OUT_IMG" print
 
 # --- 2. loop-mount -----------------------------------------------------------
 log "Attaching loop device"
-# losetup --show not in busybox; get free device first, then attach
-LOOP=$(losetup -f)
-losetup "$LOOP" "$OUT_IMG"
-# Create partition devices — required in Docker environments
-partx -a "$LOOP" 2>/dev/null || kpartx -a "$LOOP" 2>/dev/null || true
-sleep 2
-# Verify partition devices exist
-ls "${LOOP}p1" "${LOOP}p2" "${LOOP}p3" 2>/dev/null || \
-    fatal "partition devices not created — try: apk add util-linux kpartx in build container"
+# util-linux losetup (installed in build container) supports --show -fP
+LOOP=$(losetup --show -fP "$OUT_IMG")
+sleep 1
 info "Loop: $LOOP (partitions: ${LOOP}p1 ${LOOP}p2 ${LOOP}p3)"
 
 # --- 3. format ---------------------------------------------------------------
