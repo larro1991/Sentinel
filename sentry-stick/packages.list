@@ -24,9 +24,7 @@ shadow
 e2fsprogs
 e2fsprogs-extra
 
-# Boot
-grub
-grub-efi
+# Boot (grub/grub-efi only needed in build env, not in rootfs — causes grub-probe to fail)
 efibootmgr
 
 # Network
