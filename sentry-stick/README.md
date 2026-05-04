@@ -5,14 +5,37 @@ with a key-only SSH lifeline plus a full Linux rescue toolkit, and to
 **record everything it does** to a persistent partition for after-the-fact
 inspection.
 
-> Status: blind first build. The intended workflow is:
+> Status: blind first build (M1). The intended workflow is:
 > build → flash → boot on a real machine → bring USB back → read logs
 > from `/var/lib/sentry/logs/` on the third partition → fix what broke.
+>
+> **The end goal is bigger than the USB:** the USB is a bootstrap. The
+> real deliverable is `sentry-install` (M3), which lays the same SSH
+> rescue capability into a hidden subdirectory of the target server's
+> existing ESP, so emergency access remains possible after the USB is
+> removed and even when the target's main OS fails to boot.
+>
+> Target server profile is **TrueNAS Scale** (Debian + ZFS). See the
+> design docs.
 
 This subdirectory is staged for extraction into its own repository once
 the design stabilises. It does not depend on Sentinel's Rust source —
 only on the engagement-YAML protocol vocabulary (id / name / scope /
 authorization / network / ssh / audit).
+
+## Design docs
+
+Read these in order; each is self-contained.
+
+| File | What |
+|------|------|
+| [docs/00-overview.md](docs/00-overview.md)             | Current state + milestones M1–M6 |
+| [docs/01-decisions.md](docs/01-decisions.md)           | Locked decisions and rejected alternatives |
+| [docs/02-truenas-scale.md](docs/02-truenas-scale.md)   | Why the target being TrueNAS Scale changes the plan |
+| [docs/03-installer-design.md](docs/03-installer-design.md) | `sentry-install` step-by-step (M3) |
+| [docs/04-rescue-boot-parity.md](docs/04-rescue-boot-parity.md) | How the installed rescue boots vs the USB (M4) |
+| [docs/05-test-plan.md](docs/05-test-plan.md)           | What to look for in the logs you bring back (M5) |
+| [docs/06-open-questions.md](docs/06-open-questions.md) | What I still need answers on |
 
 ## What you get on a successful boot
 
