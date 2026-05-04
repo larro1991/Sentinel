@@ -1,0 +1,5 @@
+# Force LF for all shell scripts — CRLF breaks Alpine/bash execution
+*.sh        text eol=lf
+*.py        text eol=lf
+sentry-stick/rootfs-overlay/**  text eol=lf
+sentry-stick/boot-overlay/**    text eol=lf

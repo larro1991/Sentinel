@@ -78,7 +78,9 @@ parted -s "$OUT_IMG" print
 
 # --- 2. loop-mount -----------------------------------------------------------
 log "Attaching loop device"
-LOOP=$(losetup --show -fP "$OUT_IMG")
+# losetup --show not in busybox; get free device first, then attach with -P
+LOOP=$(losetup -f)
+losetup -P "$LOOP" "$OUT_IMG"
 info "Loop: $LOOP (partitions: ${LOOP}p1 ${LOOP}p2 ${LOOP}p3)"
 sleep 1
 
