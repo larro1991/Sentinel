@@ -1,0 +1,355 @@
+#!/bin/bash
+# sentry-init: runs once at boot, before sshd. Owns:
+#   * mounting boot partition (P1, FAT32) and state partition (P3, ext4)
+#   * parsing /boot/cfg/engagement.yaml
+#   * generating/restoring SSH host keys (persisted on P3)
+#   * rendering /etc/ssh/sshd_config
+#   * installing authorized_keys for the 'sentry' user
+#   * setting sentry's login shell based on auth.max_level
+#   * bringing up the network (DHCP on the configured interface)
+#   * snapshotting hardware/network state for post-mortem
+#   * painting tty1 with IP + SSH fingerprint, writing STATUS.TXT to P1
+#
+# EVERY action is logged. The early log lives on tmpfs (/run); once P3 is
+# mounted, it is copied into a per-boot directory under /var/lib/sentry/logs/
+# and a 'current' symlink points at it.
+#
+# Failures do not crash the boot — they are reported on tty1 so the operator
+# can SSH-then-fix or pull the stick out and read STATUS.TXT.
+
+# --- 0. global state ---------------------------------------------------------
+EARLY_LOG=/run/sentry-init.log
+BOOT_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$(date +%s)-$$")
+BOOT_TS=$(date -u +%Y%m%dT%H%M%SZ)
+P1_MOUNT=/boot/cfg
+P3_MOUNT=/var/lib/sentry
+LOG_BASE=$P3_MOUNT/logs
+LOG_DIR=$LOG_BASE/${BOOT_TS}-${BOOT_ID:0:8}
+LOG_CURRENT=$LOG_BASE/current
+CFG=$P1_MOUNT/engagement.yaml
+KEYS_FILE=$P1_MOUNT/authorized_keys
+STATUS_FILE=$P1_MOUNT/STATUS.TXT
+HOSTKEY_DIR=$P3_MOUNT/ssh-host-keys
+SCOPE_ENV=/etc/sentry/scope.env
+LEVEL_FILE=/etc/sentry/auth.level
+ALLOWED_FILE=/etc/sentry/allowed_devices
+EXCLUDED_FILE=/etc/sentry/excluded_devices
+BANNER_FILE=/etc/sentry/banner
+
+mkdir -p /run /etc/sentry
+
+# Mirror everything to tmpfs early log + tty + syslog.
+exec > >(tee -a "$EARLY_LOG" | logger -t sentry-init -p user.info) 2>&1
+echo "===== sentry-init starting boot_id=$BOOT_ID ts=$BOOT_TS ====="
+set -x
+
+# --- error handling: never crash the boot ----------------------------------
+final_rc=0
+on_exit() {
+    rc=$?
+    set +x
+    if [ "$rc" -ne 0 ]; then final_rc=$rc; fi
+    echo "===== sentry-init finishing rc=$final_rc ====="
+
+    # Try one more time to persist logs even on failure.
+    if mountpoint -q "$P3_MOUNT" 2>/dev/null; then
+        mkdir -p "$LOG_DIR" 2>/dev/null
+        cp -f "$EARLY_LOG" "$LOG_DIR/boot.log" 2>/dev/null
+        ln -sfn "$LOG_DIR" "$LOG_CURRENT" 2>/dev/null
+    fi
+
+    if [ "$final_rc" -ne 0 ]; then
+        # Loud failure on tty1.
+        {
+            echo
+            echo "########################################################"
+            echo "# SENTRY-INIT FAILED  (exit $final_rc, boot_id=${BOOT_ID:0:8})"
+            echo "# Last 40 lines of /run/sentry-init.log:"
+            echo "########################################################"
+            tail -40 "$EARLY_LOG" 2>/dev/null
+            echo "########################################################"
+            echo "# Logs: ${LOG_DIR} (if P3 is mounted)"
+            echo "########################################################"
+        } > /etc/issue
+    fi
+}
+trap on_exit EXIT
+fail_soft() {
+    echo "WARN: $*" >&2
+    final_rc=1
+}
+
+# --- 1. find and mount partitions ------------------------------------------
+echo "[1] mounting boot partition (P1, FAT32, label=SENTRYBOOT)"
+mkdir -p "$P1_MOUNT"
+if ! mountpoint -q "$P1_MOUNT"; then
+    if ! mount -t vfat -o rw /dev/disk/by-label/SENTRYBOOT "$P1_MOUNT" 2>/dev/null; then
+        # Fallback: try by-partlabel
+        mount -o rw /dev/disk/by-partlabel/SENTRYBOOT "$P1_MOUNT" \
+            || fail_soft "could not mount SENTRYBOOT — engagement.yaml unreadable"
+    fi
+fi
+
+echo "[1] mounting state partition (P3, ext4, label=sentry-state)"
+mkdir -p "$P3_MOUNT"
+if ! mountpoint -q "$P3_MOUNT"; then
+    if ! mount -t ext4 -o rw,noatime /dev/disk/by-label/sentry-state "$P3_MOUNT"; then
+        fail_soft "P3 mount failed — falling back to tmpfs (logs WILL NOT persist)"
+        mount -t tmpfs -o size=128m none "$P3_MOUNT"
+    fi
+fi
+
+mkdir -p "$LOG_DIR" "$LOG_DIR/sessions" "$LOG_DIR/sudo-io" \
+         "$HOSTKEY_DIR" "$P3_MOUNT/audit"
+ln -sfn "$LOG_DIR" "$LOG_CURRENT"
+
+# Bind-mount /var/log so syslog/sshd/sudo logs land on P3 automatically.
+mkdir -p "$LOG_DIR/var-log"
+if ! mountpoint -q /var/log; then mkdir -p /var/log; fi
+mount --bind "$LOG_DIR/var-log" /var/log || fail_soft "/var/log bind-mount failed"
+
+# Touch the exec audit log so sentry-exec can append immediately.
+: > "$LOG_DIR/exec.jsonl"
+
+# Snapshot the early log into the persistent dir from here on out.
+cp -f "$EARLY_LOG" "$LOG_DIR/boot.log" 2>/dev/null
+# Keep tee'ing into both for the rest of init.
+exec > >(tee -a "$LOG_DIR/boot.log" | logger -t sentry-init -p user.info) 2>&1
+
+# --- 2. detect boot device and auto-exclude it -----------------------------
+BOOT_PART=$(findmnt -no SOURCE "$P1_MOUNT" 2>/dev/null || true)
+BOOT_DEV=""
+if [ -n "$BOOT_PART" ]; then
+    # Strip trailing partition number (sda1 -> sda, nvme0n1p1 -> nvme0n1, mmcblk0p1 -> mmcblk0)
+    case "$BOOT_PART" in
+        */nvme*p[0-9]*|*/mmcblk*p[0-9]*|*/loop*p[0-9]*)
+            BOOT_DEV=${BOOT_PART%p[0-9]*} ;;
+        *[0-9])
+            BOOT_DEV=${BOOT_PART%[0-9]*} ;;
+        *)
+            BOOT_DEV=$BOOT_PART ;;
+    esac
+fi
+echo "[2] boot partition=$BOOT_PART  boot device=$BOOT_DEV"
+
+# --- 3. parse engagement.yaml -----------------------------------------------
+echo "[3] parsing $CFG"
+yq=$(command -v yq) || true
+if [ -z "$yq" ] || [ ! -r "$CFG" ]; then
+    fail_soft "no yq or no engagement.yaml — using built-in defaults"
+    ID="sentry"
+    HOST="sentry"
+    IFACE="eth0"
+    NET_MODE="dhcp"
+    SSH_PORT=22
+    SSH_BIND="0.0.0.0"
+    SSH_BANNER="Sentry — engagement.yaml missing or unreadable."
+    MAX_LEVEL="passive"
+    ALLOWED=""
+    EXCLUDED=""
+else
+    ID=$($yq -r '.id // "sentry"'                              "$CFG")
+    HOST=$($yq -r '.network.hostname // "sentry"'              "$CFG")
+    IFACE=$($yq -r '.network.interface // "eth0"'              "$CFG")
+    NET_MODE=$($yq -r '.network.mode // "dhcp"'                "$CFG")
+    SSH_PORT=$($yq -r '.ssh.port // 22'                        "$CFG")
+    SSH_BIND=$($yq -r '.ssh.bind_address // "0.0.0.0"'         "$CFG")
+    SSH_BANNER=$($yq -r '.ssh.banner // "Sentry"'              "$CFG")
+    MAX_LEVEL=$($yq -r '.authorization.max_level // "scanning"' "$CFG")
+    ALLOWED=$($yq -r '.scope.allowed_devices[]? // ""'         "$CFG")
+    EXCLUDED=$($yq -r '.scope.excluded_devices[]? // ""'       "$CFG")
+fi
+
+case "$MAX_LEVEL" in
+    passive|scanning) ;;
+    verification|exploitation|post_exploit)
+        echo "WARN: max_level=$MAX_LEVEL not yet implemented; treating as scanning"
+        MAX_LEVEL=scanning ;;
+    *)  echo "WARN: unknown max_level=$MAX_LEVEL; treating as passive"
+        MAX_LEVEL=passive ;;
+esac
+
+echo "[3] config: id=$ID host=$HOST iface=$IFACE mode=$NET_MODE port=$SSH_PORT level=$MAX_LEVEL"
+
+# --- 4. write scope env files -----------------------------------------------
+echo "[4] writing scope env"
+{
+    [ -n "$ALLOWED"  ] && echo "$ALLOWED"
+} > "$ALLOWED_FILE"
+{
+    [ -n "$EXCLUDED" ] && echo "$EXCLUDED"
+    # ALWAYS exclude the boot USB itself — never let the operator wipe the stick.
+    if [ -n "$BOOT_DEV" ]; then
+        echo "$BOOT_DEV"
+        echo "${BOOT_DEV}*"
+    fi
+} > "$EXCLUDED_FILE"
+echo "$MAX_LEVEL" > "$LEVEL_FILE"
+{
+    echo "MAX_LEVEL=$MAX_LEVEL"
+    echo "ALLOWED_DEVICES_FILE=$ALLOWED_FILE"
+    echo "EXCLUDED_DEVICES_FILE=$EXCLUDED_FILE"
+} > "$SCOPE_ENV"
+echo "$SSH_BANNER" > "$BANNER_FILE"
+
+# --- 5. hostname -----------------------------------------------------------
+echo "[5] setting hostname=$HOST"
+hostname "$HOST"      || fail_soft "hostname command failed"
+echo "$HOST" > /etc/hostname
+
+# --- 6. SSH host keys: restore from P3 or generate fresh -------------------
+echo "[6] preparing SSH host keys"
+mkdir -p /etc/ssh
+restored=0
+for kt in ed25519 rsa ecdsa; do
+    src="$HOSTKEY_DIR/ssh_host_${kt}_key"
+    if [ -r "$src" ]; then
+        cp -f "$src"     "/etc/ssh/ssh_host_${kt}_key"
+        cp -f "$src.pub" "/etc/ssh/ssh_host_${kt}_key.pub" 2>/dev/null || true
+        restored=$((restored+1))
+    fi
+done
+if [ "$restored" -eq 0 ]; then
+    echo "[6] no persisted host keys found — generating fresh"
+    rm -f /etc/ssh/ssh_host_*key /etc/ssh/ssh_host_*key.pub
+    ssh-keygen -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key
+    ssh-keygen -t rsa -b 4096 -N '' -f /etc/ssh/ssh_host_rsa_key
+    cp -f /etc/ssh/ssh_host_*_key  "$HOSTKEY_DIR/" 2>/dev/null
+    cp -f /etc/ssh/ssh_host_*_key.pub "$HOSTKEY_DIR/" 2>/dev/null
+fi
+chmod 600 /etc/ssh/ssh_host_*_key      2>/dev/null || true
+chmod 644 /etc/ssh/ssh_host_*_key.pub  2>/dev/null || true
+FINGERPRINT=$(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null | awk '{print $2}')
+echo "[6] ed25519 fingerprint: $FINGERPRINT"
+
+# --- 7. render sshd_config from template ------------------------------------
+echo "[7] rendering sshd_config"
+sed -e "s|@PORT@|$SSH_PORT|g" \
+    -e "s|@BIND@|$SSH_BIND|g" \
+    /etc/ssh/sshd_config.template > /etc/ssh/sshd_config
+
+# --- 8. ensure 'sentry' user, set its shell, install authorized_keys -------
+echo "[8] configuring 'sentry' user"
+case "$MAX_LEVEL" in
+    passive)  SENTRY_SHELL=/usr/local/bin/sentry-rsh ;;
+    *)        SENTRY_SHELL=/bin/bash ;;
+esac
+
+if ! id sentry >/dev/null 2>&1; then
+    adduser -D -s "$SENTRY_SHELL" -G wheel sentry
+fi
+# Switch shell if changed since last boot
+sed -i "s|^sentry:.*|sentry:x:$(id -u sentry):$(id -g sentry)::/home/sentry:$SENTRY_SHELL|" /etc/passwd
+# Unlock + clear password (key-only auth — but locked accounts are refused by some sshd builds).
+passwd -d sentry >/dev/null 2>&1 || true
+
+mkdir -p /home/sentry/.ssh
+key_count=0
+if [ -r "$KEYS_FILE" ]; then
+    grep -vE '^\s*(#|$)' "$KEYS_FILE" > /home/sentry/.ssh/authorized_keys
+    key_count=$(wc -l < /home/sentry/.ssh/authorized_keys)
+else
+    : > /home/sentry/.ssh/authorized_keys
+    fail_soft "no $KEYS_FILE on boot partition; SSH will refuse all logins"
+fi
+chown -R sentry:sentry /home/sentry/.ssh
+chmod 700 /home/sentry/.ssh
+chmod 600 /home/sentry/.ssh/authorized_keys
+echo "[8] installed $key_count authorized key(s) for 'sentry' (shell=$SENTRY_SHELL)"
+
+# --- 9. network bring-up ----------------------------------------------------
+echo "[9] bringing up $IFACE ($NET_MODE)"
+if ! ip link show "$IFACE" >/dev/null 2>&1; then
+    fail_soft "interface $IFACE not present; available: $(ip -o link | awk -F': ' '{print $2}' | tr '\n' ' ')"
+else
+    ip link set "$IFACE" up
+    case "$NET_MODE" in
+        dhcp)
+            # busybox udhcpc; bound to interface, single attempt, exit when bound.
+            udhcpc -i "$IFACE" -t 6 -T 3 -A 5 -q -n -O hostname \
+                -s /usr/share/udhcpc/default.script \
+                || fail_soft "udhcpc on $IFACE failed (no DHCP lease)"
+            ;;
+        *)
+            fail_soft "net mode $NET_MODE not supported in MVP"
+            ;;
+    esac
+fi
+sleep 1
+IP=$(ip -4 -o addr show "$IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+[ -n "$IP" ] || IP="(no IP)"
+GW=$(ip -4 route show default 2>/dev/null | awk '/default/ {print $3; exit}')
+echo "[9] $IFACE ip=$IP gw=${GW:-(none)}"
+
+# --- 10. snapshot system state for post-mortem ------------------------------
+echo "[10] snapshotting hardware/network/process state"
+snap() { fn="$LOG_DIR/snapshot-$1.txt"; shift; { echo "# $*"; echo "# $(date -u +%Y-%m-%dT%H:%M:%SZ)"; "$@"; } > "$fn" 2>&1; }
+snap cmdline       cat /proc/cmdline
+snap os-release    cat /etc/os-release
+snap mounts        mount
+snap proc-mounts   cat /proc/mounts
+snap ip-addr       ip -d addr
+snap ip-route      ip -d route
+snap ip-link       ip -d link
+snap resolv        cat /etc/resolv.conf
+snap listening     ss -tulpn
+snap lsblk         lsblk -O
+snap blkid         blkid
+snap lspci         lspci -vv
+snap lsusb         lsusb
+snap lscpu         lscpu
+snap free          free -h
+snap dmidecode     dmidecode
+snap modules       lsmod
+snap dmesg         dmesg
+snap ps            ps auxf
+snap apk-info      apk info -v
+snap rc-status     rc-status --all
+snap kernel-ver    uname -a
+snap timestamp     date -u
+
+# Live dmesg follower for the rest of uptime.
+nohup dmesg -wH > "$LOG_DIR/dmesg-live.log" 2>&1 &
+echo $! > "$LOG_DIR/dmesg-live.pid"
+
+# --- 11. STATUS.TXT and tty1 banner -----------------------------------------
+echo "[11] writing STATUS.TXT and /etc/issue"
+mountpoint -q "$P1_MOUNT" && mount -o remount,rw "$P1_MOUNT"
+
+cat > "$STATUS_FILE" <<EOF
+================================================================
+ Sentry — bootable SSH lifeline
+================================================================
+ Engagement     $ID
+ Boot ID        $BOOT_ID
+ Boot time      $BOOT_TS UTC
+ Hostname       $HOST
+ Interface      $IFACE
+ IP address     $IP
+ Gateway        ${GW:-(none)}
+ SSH command    ssh sentry@$IP -p $SSH_PORT
+ Fingerprint    $FINGERPRINT
+ Auth level     $MAX_LEVEL
+ Auth keys      $key_count installed
+ Logs           $LOG_DIR (on P3 ext4)
+================================================================
+EOF
+sync
+mountpoint -q "$P1_MOUNT" && mount -o remount,ro "$P1_MOUNT" 2>/dev/null
+
+cp "$STATUS_FILE" /etc/issue.sentry
+{
+    echo
+    cat /etc/issue.sentry
+    echo
+} > /etc/issue
+
+# --- 12. structured boot event ----------------------------------------------
+{
+    printf '{"ts":"%s","event":"boot","id":"%s","boot_id":"%s","host":"%s","iface":"%s","ip":"%s","gw":"%s","port":%s,"level":"%s","fingerprint":"%s","keys":%s,"final_rc":%s}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ID" "$BOOT_ID" "$HOST" "$IFACE" \
+        "$IP" "${GW:-}" "$SSH_PORT" "$MAX_LEVEL" "$FINGERPRINT" "$key_count" "$final_rc"
+} >> "$LOG_BASE/boots.jsonl"
+
+echo "[done] sentry-init OK ip=$IP fp=$FINGERPRINT level=$MAX_LEVEL keys=$key_count"
+exit "$final_rc"

@@ -1,0 +1,148 @@
+#!/bin/sh
+# sentry-exec: guarded wrapper around privileged operations.
+#
+# Invoked exclusively via `sudo /sbin/sentry-exec <op> [args...]`.
+# Enforces:
+#   1. Op-class against the engagement's authorization.max_level.
+#   2. Any /dev/* path in args against allowed_devices / excluded_devices.
+#
+# Logs every decision (allow + deny) to /var/lib/sentry/logs/current/exec.jsonl
+# AND to syslog (auth.notice).
+
+set -u
+
+SCOPE_ENV=/etc/sentry/scope.env
+LEVEL_FILE=/etc/sentry/auth.level
+ALLOWED_FILE=/etc/sentry/allowed_devices
+EXCLUDED_FILE=/etc/sentry/excluded_devices
+LOGDIR_LINK=/var/lib/sentry/logs/current
+EXEC_LOG="$LOGDIR_LINK/exec.jsonl"
+
+logger -t sentry-exec -p auth.notice "invoked: $*"
+
+if [ -r "$SCOPE_ENV" ]; then
+    . "$SCOPE_ENV"
+fi
+LEVEL=$(cat "$LEVEL_FILE" 2>/dev/null || echo unknown)
+
+ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+emit() {
+    decision=$1; reason=$2; op=$3; shift 3
+    user="${SUDO_USER:-$(id -un)}"
+    # JSON-escape argv (lazy: backslash and quote)
+    esc_args=""
+    for a in "$@"; do
+        e=$(printf '%s' "$a" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        esc_args="$esc_args\"$e\","
+    done
+    esc_args="[${esc_args%,}]"
+    line=$(printf '{"ts":"%s","decision":"%s","reason":"%s","user":"%s","op":"%s","level":"%s","args":%s}\n' \
+        "$(ts)" "$decision" "$reason" "$user" "$op" "$LEVEL" "$esc_args")
+    {
+        printf '%s' "$line"
+        printf '\n'
+    } >> "$EXEC_LOG" 2>/dev/null || true
+    logger -t sentry-exec -p auth.notice "$line"
+}
+
+deny() {
+    emit deny "$1" "${OP:-?}" "$@"
+    echo "sentry-exec: DENY ($1)" >&2
+    exit 1
+}
+
+# ---- 1. parse op ----
+OP=${1:-}
+[ -n "$OP" ] || { echo "usage: sentry-exec <op> [args...]" >&2; exit 2; }
+shift
+
+# ---- 2. op classification & required level ----
+# MVP: passive < scanning. Higher rungs (verification/exploitation/post_exploit)
+# are reserved — they map onto scanning for now and will diverge later.
+required_level_for_op() {
+    case "$1" in
+        # passive — read-only inspection that needs root only because of /dev permissions
+        lvs|vgs|pvs|mdadm-detail|smart|scan-disks)
+            echo passive ;;
+        # scanning — read-write block-device ops
+        mount|mount-rw|umount|fsck|mkfs|parted|wipefs|dd|cryptsetup|lvcreate|vgcreate|pvcreate|mdadm|chroot|grub-install)
+            echo scanning ;;
+        *) echo "" ;;
+    esac
+}
+
+REQ=$(required_level_for_op "$OP")
+[ -n "$REQ" ] || deny "unknown_op" "$OP" "$@"
+
+level_at_least() {
+    have=$1; want=$2
+    rank() { case "$1" in passive) echo 0;; scanning) echo 1;; verification) echo 2;; exploitation) echo 3;; post_exploit) echo 4;; *) echo -1;; esac; }
+    [ "$(rank "$have")" -ge "$(rank "$want")" ]
+}
+
+if ! level_at_least "$LEVEL" "$REQ"; then
+    deny "level_insufficient_${LEVEL}_lt_${REQ}" "$OP" "$@"
+fi
+
+# ---- 3. device-scope check ----
+device_in_list() {
+    dev=$1; list=$2
+    [ -r "$list" ] || return 1
+    while IFS= read -r pat; do
+        case "$pat" in ''|\#*) continue ;; esac
+        # shell glob match; case turns globs on
+        case "$dev" in $pat) return 0 ;; esac
+    done < "$list"
+    return 1
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        /dev/*)
+            real=$(readlink -f "$arg" 2>/dev/null || printf '%s' "$arg")
+            if device_in_list "$arg"  "$EXCLUDED_FILE" \
+            || device_in_list "$real" "$EXCLUDED_FILE"; then
+                deny "device_excluded:$arg" "$OP" "$@"
+            fi
+            if ! device_in_list "$arg"  "$ALLOWED_FILE" \
+            && ! device_in_list "$real" "$ALLOWED_FILE"; then
+                deny "device_not_allowed:$arg" "$OP" "$@"
+            fi
+            ;;
+    esac
+done
+
+# ---- 4. dispatch ----
+emit allow "checks_passed" "$OP" "$@"
+
+case "$OP" in
+    mount)        exec /bin/mount -o ro "$@" ;;          # default RO; use mount-rw for writes
+    mount-rw)     exec /bin/mount "$@" ;;
+    umount)       exec /bin/umount "$@" ;;
+    fsck)         exec /sbin/fsck "$@" ;;
+    mkfs)
+        # usage: sentry-exec mkfs <fstype> /dev/<...> [...]
+        fs=${1:-}; [ -n "$fs" ] || deny "mkfs_missing_fstype" "$OP" "$@"
+        shift
+        bin="/sbin/mkfs.$fs"
+        [ -x "$bin" ] || deny "mkfs_unknown_fstype:$fs" "$OP" "$@"
+        exec "$bin" "$@"
+        ;;
+    parted)       exec /usr/sbin/parted "$@" ;;
+    wipefs)       exec /sbin/wipefs "$@" ;;
+    dd)           exec /bin/dd "$@" ;;
+    cryptsetup)   exec /sbin/cryptsetup "$@" ;;
+    lvs|vgs|pvs)  exec "/sbin/$OP" "$@" ;;
+    lvcreate|vgcreate|pvcreate)
+                  exec "/sbin/$OP" "$@" ;;
+    mdadm)        exec /sbin/mdadm "$@" ;;
+    mdadm-detail) exec /sbin/mdadm --detail "$@" ;;
+    smart)        exec /usr/sbin/smartctl "$@" ;;
+    scan-disks)   exec /bin/lsblk -O "$@" ;;
+    chroot)       exec /usr/sbin/chroot "$@" ;;
+    grub-install) exec /usr/sbin/grub-install "$@" ;;
+esac
+
+# Should be unreachable.
+deny "no_dispatch" "$OP" "$@"

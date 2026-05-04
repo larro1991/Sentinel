@@ -1,0 +1,54 @@
+# Sentry engagement configuration.
+# Schema mirrors Sentinel's engagement.yaml; subset used by sentry-init.
+# Edit on any laptop (this partition mounts as FAT32 on Win/Mac/Linux).
+
+id:   "sentry-lab-001"
+name: "Bootable SSH lifeline (default)"
+
+scope:
+  # Only operate when the box's IP falls inside one of these subnets.
+  # MVP: scope is informational only (logged, not enforced).
+  allowed_subnets:
+    - "192.168.0.0/16"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+  excluded_subnets: []
+
+  # Block-device scope. The boot USB itself is auto-added to excluded_devices
+  # at boot — you cannot accidentally wipe the stick you booted from.
+  allowed_devices:
+    - "/dev/sda"
+    - "/dev/sda*"
+    - "/dev/nvme0n1"
+    - "/dev/nvme0n1p*"
+  excluded_devices: []
+
+  # Time-window enforcement is logged but not enforced in MVP.
+  time_windows:
+    - { start: "00:00", end: "23:59",
+        days: ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"] }
+
+authorization:
+  # Two rungs implemented in MVP:
+  #   passive  — restricted shell, read-only inspection commands
+  #   scanning — full bash; mount/mkfs/parted/dd/etc. via `sudo sentry-exec`
+  max_level:          "scanning"
+  auto_approve_up_to: "scanning"
+
+network:
+  interface: "eth0"
+  mode:      "dhcp"          # only dhcp supported in MVP
+  hostname:  "sentry"
+
+ssh:
+  port:         22
+  bind_address: "0.0.0.0"
+  banner:       "Sentry — authorized access only. All sessions are recorded."
+  # Public keys come from /authorized_keys on this same partition,
+  # one key per line. Lines starting with # are ignored.
+
+audit:
+  # Where boot logs, shell recordings, sudo logs, sentry-exec decisions go.
+  # This is on P3 (sentry-state ext4) — survives reboots until you wipe P3.
+  output_dir: "/var/lib/sentry/logs"
+  formats:    ["jsonl", "typescript"]

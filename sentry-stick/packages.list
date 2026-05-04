@@ -1,0 +1,80 @@
+# Alpine apk packages installed into the rootfs.
+# Lines starting with # and blank lines are ignored by build.sh.
+
+# Core base + init
+alpine-base
+alpine-conf
+linux-lts
+linux-firmware-none
+linux-firmware-intel
+linux-firmware-realtek
+linux-firmware-other
+mkinitfs
+openrc
+busybox-suid
+busybox-openrc
+bash
+coreutils
+util-linux
+findutils
+sudo
+shadow
+e2fsprogs
+e2fsprogs-extra
+
+# Boot
+grub
+grub-efi
+efibootmgr
+
+# Network
+iproute2
+iputils
+avahi
+avahi-tools
+chrony
+
+# SSH
+openssh-server
+openssh-keygen
+openssh-client
+
+# YAML / JSON parsing for shell
+yq
+jq
+
+# Logging / debug visibility
+logrotate
+
+# Rescue toolkit (the whole point of the stick once you SSH in)
+parted
+gptfdisk
+dosfstools
+xfsprogs
+btrfs-progs
+lvm2
+cryptsetup
+mdadm
+nvme-cli
+smartmontools
+rsync
+tmux
+screen
+vim
+nano
+tcpdump
+bind-tools
+mtr
+htop
+lsof
+strace
+pciutils
+usbutils
+hdparm
+dmidecode
+file
+less
+which
+curl
+wget
+ca-certificates

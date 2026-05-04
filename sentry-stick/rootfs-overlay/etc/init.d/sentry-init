@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+description="Sentry boot-time initialization (parses engagement.yaml, brings up network, configures sshd)"
+
+depend() {
+    need localmount
+    need sysfs
+    after udev devfs modules
+    before sshd avahi-daemon chronyd
+}
+
+start() {
+    ebegin "Running sentry-init"
+    /sbin/sentry-init
+    eend $? "sentry-init failed (see /var/lib/sentry/logs/current/boot.log)"
+}

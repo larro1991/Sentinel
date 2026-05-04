@@ -1,0 +1,39 @@
+#!/bin/bash
+# Sentry passive (read-only) shell.
+# Login shell for the 'sentry' user when engagement.yaml sets
+# authorization.max_level: passive.
+#
+# PATH is restricted to /etc/sentry/passive-bin, a directory of symlinks
+# to inspection-only commands populated at build time. bash --restricted
+# additionally forbids `cd`, redirection to absolute paths, and `exec`.
+
+if [ -d /etc/sentry/passive-bin ]; then
+    PATH=/etc/sentry/passive-bin
+else
+    PATH=/bin:/usr/bin
+fi
+export PATH
+unset BASH_ENV ENV
+HISTFILE="${SENTRY_LOG_DIR:-/tmp}/passive-$(date -u +%Y%m%dT%H%M%SZ)-$$.history"
+HISTTIMEFORMAT='%F %T  '
+export HISTFILE HISTTIMEFORMAT
+PS1='\u@\h [PASSIVE]\$ '
+export PS1
+
+cat <<'BANNER'
+========================================================================
+ Sentry [PASSIVE] — read-only inspection shell.
+
+ Allowed: ls, cat, less, lsblk, smartctl, journalctl, ip, ss, ps, dmesg,
+          dig, mtr, file, stat, df, du, lscpu, lspci, lsusb, dmidecode,
+          and a handful of others. Type   ls /etc/sentry/passive-bin   to
+          see the full list.
+
+ To run privileged inspection or repair operations, the engagement YAML
+ must grant max_level: scanning (or higher) and the box must be rebooted.
+
+ This session is being recorded.
+========================================================================
+BANNER
+
+exec /bin/bash --restricted --noprofile --norc -i

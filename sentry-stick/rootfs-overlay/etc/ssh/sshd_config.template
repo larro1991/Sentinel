@@ -1,0 +1,37 @@
+# Rendered by sentry-init at boot. Tokens of the form @TOKEN@ are
+# replaced. The output goes to /etc/ssh/sshd_config.
+
+Port @PORT@
+ListenAddress @BIND@
+
+# Hardening
+Protocol 2
+PermitRootLogin no
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+PermitEmptyPasswords no
+MaxAuthTries 3
+LoginGraceTime 30
+ClientAliveInterval 60
+ClientAliveCountMax 3
+AllowUsers sentry
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding yes
+GatewayPorts no
+PrintMotd yes
+PrintLastLog yes
+TCPKeepAlive yes
+AcceptEnv LANG LC_*
+
+# Verbose logging — every connect/disconnect, every key fingerprint used.
+SyslogFacility AUTH
+LogLevel VERBOSE
+
+Banner /etc/sentry/banner
+
+Subsystem sftp /usr/lib/ssh/sftp-server
