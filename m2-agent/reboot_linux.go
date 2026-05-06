@@ -12,7 +12,9 @@ var bootEntryRe = regexp.MustCompile(`^Boot([0-9A-F]{4})\* (.+)$`)
 
 func SetNextBootAndReboot(entry string) error {
 	if entry == "" {
-		entry = "sentry"
+		// Plain reboot — no EFI BootNext manipulation.
+		_, err := runCmd("sudo", "/sbin/reboot")
+		return err
 	}
 
 	out, err := runCmd("sudo", "/usr/sbin/efibootmgr", "-v")
@@ -37,7 +39,7 @@ func SetNextBootAndReboot(entry string) error {
 		}
 	}
 
-	return fmt.Errorf("no matching boot entry")
+	return fmt.Errorf("no matching boot entry for %q", entry)
 }
 
 func Poweroff() error {

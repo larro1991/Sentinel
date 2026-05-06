@@ -115,11 +115,11 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", handleHealth)
-	mux.HandleFunc("GET /info", handleInfo)
-	mux.HandleFunc("POST /shell", handleShell)
-	mux.HandleFunc("POST /reboot", handleReboot)
-	mux.HandleFunc("POST /poweroff", handlePoweroff)
+	mux.HandleFunc("/health", handleHealth)
+	mux.HandleFunc("/info", handleInfo)
+	mux.HandleFunc("/shell", handleShell)
+	mux.HandleFunc("/reboot", handleReboot)
+	mux.HandleFunc("/poweroff", handlePoweroff)
 
 	srv := &http.Server{
 		Addr:    ":" + port,

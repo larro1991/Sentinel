@@ -1,3 +1,3 @@
-module github.com/sentry-stick/m2-agent
+module github.com/larro1991/bedrock
 
-go 1.22
+go 1.19

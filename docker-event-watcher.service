@@ -1,0 +1,16 @@
+[Unit]
+Description=Docker Event Watcher — push-based container health alerts
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/sbin/docker-event-watcher.py
+Restart=always
+RestartSec=5
+Environment=TELEGRAM_BOT_TOKEN=8797657200:AAHsyfQqiS1uGwinqL7_NPlJ2bbL-rYBJCA
+Environment=TELEGRAM_CHAT_ID=8626879596
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
