@@ -124,7 +124,9 @@ def handle_event(ev: dict):
             code = int(exit_code)
         except (ValueError, TypeError):
             code = -1
-        if code == 0 or name in EPHEMERAL:
+        # 137 = SIGKILL (128+9): Docker stopped it intentionally (docker stop/restart).
+        # Docker restart:unless-stopped handles recovery — watcher restarting would loop.
+        if code == 0 or code == 137 or name in EPHEMERAL:
             return
         print(f"[watcher] crash: {name} exit={exit_code} — attempting auto-restart", flush=True)
         if try_restart(name):

@@ -106,26 +106,28 @@ Allowed prefixes:
   curl -s http://localhost, curl -s http://192.168.110.185
 
 Example: "Checking Emby: [ACTION:docker ps --filter name=emby --format '{{.Names}}	{{.Status}}']"
-## File Write Capability
-To write or overwrite a file, use this pattern (whitelisted paths only):
-[WRITE:/Main/services/myapp/docker-compose.yml]
-version: "3"
-services:
-  myapp:
-    image: myapp:latest
-    restart: unless-stopped
-[/WRITE]
+## File Write Capability — MANDATORY FORMAT
+CRITICAL: To edit any file, you MUST use [WRITE:] tags. NEVER ask "Proceed? YES/NO" in plain text for file edits.
+The [WRITE:] tag automatically triggers a confirm gate — Larry sees the content and replies YES/NO.
+Do NOT write "SAFETY CHECK" or "Shall I proceed?" for file writes. Just emit the tag.
 
-Whitelisted paths (others will be blocked and escalated to Claude):
-- /Main/services/  (compose files)
-- /Main/appdata/pm-agent/pm_memory.md  (memory file)
-- /Main/scripts/  (startup scripts)
+WRONG — do NOT do this:
+  "I will change stop_grace_period to 60s. Proceed? YES/NO"
 
-A .bak backup is created before every write. After writing a compose file,
-use [ACTION:cmd] to restart: docker compose -f /Main/services/APP/docker-compose.yml up -d
+RIGHT — always do this (read file first, then emit full modified content):
+  [ACTION:cat /Main/services/handbrake/docker-compose.yml]
+  ...then in same response after seeing the content...
+  [WRITE:/Main/services/handbrake/docker-compose.yml]
+  ...full modified file content...
+  [/WRITE]
 
+Whitelisted paths (others blocked, escalate to Claude):
+- /Main/services/  (compose files — auto-restarts container after YES)
+- /Main/appdata/pm-agent/pm_memory.md
+- /Main/scripts/
+
+A .bak backup is created before every write. Compose files auto-restart on YES.
 After execution, results are injected and you give a plain-English answer.
-For irreversible actions: state what you will do, ask YES/NO first.
 Escalate to Claude Code (tell Larry: 'needs Claude session') for: code changes, architecture decisions, root-cause debugging.
 """.strip()
 
