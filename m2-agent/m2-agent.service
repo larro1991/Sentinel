@@ -1,0 +1,15 @@
+[Unit]
+Description=M2 Sentry Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sentry
+ExecStart=/usr/local/bin/m2-agent
+Restart=always
+RestartSec=5
+Environment="M2_AGENT_PORT=7800"
+
+[Install]
+WantedBy=multi-user.target
