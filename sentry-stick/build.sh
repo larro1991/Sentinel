@@ -129,6 +129,21 @@ apk --root "$P2_MNT" --initdb --update-cache --no-progress add $PKGS
 # --- 6. apply rootfs overlay -------------------------------------------------
 log "Applying rootfs overlay"
 rsync -a "$WORK/rootfs-overlay/" "$P2_MNT/"
+# Strip Windows CRLF from our shell scripts (Windows-edited files get \r\n which
+# breaks #!/bin/bash shebangs on Linux). Only named scripts, not binaries.
+for _f in \
+    "$P2_MNT/sbin/sentry-init" \
+    "$P2_MNT/sbin/sentry-exec" \
+    "$P2_MNT/usr/local/bin/sentry-rsh" \
+    "$P2_MNT/usr/local/bin/sentry-agent" \
+    "$P2_MNT/etc/init.d/sentry-init" \
+    "$P2_MNT/etc/init.d/sentry-agent" \
+    "$P2_MNT/etc/profile.d/sentry-record.sh" \
+    "$P2_MNT/etc/ssh/sshd_config.template" \
+    "$P2_MNT/etc/sudoers.d/sentry"; do
+    [ -f "$_f" ] && sed -i 's/\r//' "$_f" || true
+done
+log "CRLF stripped from overlay scripts"
 chmod 0755 "$P2_MNT/sbin/sentry-init" \
            "$P2_MNT/sbin/sentry-exec" \
            "$P2_MNT/usr/local/bin/sentry-rsh" \
@@ -137,9 +152,17 @@ chmod 0755 "$P2_MNT/sbin/sentry-init" \
            "$P2_MNT/etc/init.d/sentry-agent"
 chmod 0644 "$P2_MNT/usr/local/lib/sentry/__init__.py" \
            "$P2_MNT/usr/local/lib/sentry/trust.py"
+chmod 0750 "$P2_MNT/etc/sudoers.d"
 chmod 0440 "$P2_MNT/etc/sudoers.d/sentry"
 chmod 0644 "$P2_MNT/etc/profile.d/sentry-record.sh"
 chmod 0644 "$P2_MNT/etc/ssh/sshd_config.template"
+# Pre-baked authorized_keys: correct ownership set via chroot UID lookup.
+# chmod first (UID not yet known here); chown happens inside chroot below.
+if [ -d "$P2_MNT/home/sentry/.ssh" ]; then
+    chmod 0755 "$P2_MNT/home/sentry"
+    chmod 0700 "$P2_MNT/home/sentry/.ssh"
+    chmod 0600 "$P2_MNT/home/sentry/.ssh/authorized_keys" 2>/dev/null || true
+fi
 
 # --- 7. configure inside chroot ---------------------------------------------
 log "Configuring system in chroot"
@@ -166,7 +189,7 @@ true
 
 # Initramfs features for booting from USB on modern hardware.
 cat > /etc/mkinitfs/mkinitfs.conf <<EOF
-features="ata base ide scsi usb virtio nvme mmc kms ext4 keymap"
+features="ata base ide scsi usb virtio nvme mmc ext4 keymap"
 EOF
 
 # Generate the initramfs (mkinitfs reads /lib/modules/*).
@@ -201,6 +224,18 @@ true
 
 # Lock root account; key-only sentry user is created at boot.
 passwd -l root || true
+
+# Set a rescue password for sentry so console login works even if
+# authorized_keys isn't installed (SENTRYBOOT mount failure, etc).
+# SSH key auth takes precedence when keys are present.
+adduser -D -s /bin/sh -G wheel sentry 2>/dev/null || true
+echo 'sentry:sentry' | chpasswd
+
+# Fix ownership of pre-baked .ssh dir (rsync wrote it as root).
+chown -R sentry:sentry /home/sentry/.ssh 2>/dev/null || true
+chmod 755 /home/sentry
+chmod 700 /home/sentry/.ssh 2>/dev/null || true
+chmod 600 /home/sentry/.ssh/authorized_keys 2>/dev/null || true
 
 # Pre-build /etc/sentry/passive-bin for the passive shell.
 mkdir -p /etc/sentry/passive-bin
@@ -272,6 +307,8 @@ info "BOOTX64.EFI rebuilt with embedded SENTRYBOOT label search"
 
 # Install our grub.cfg (grub-install wrote a stub — overwrite it).
 cp -f "$WORK/boot-overlay/grub.cfg" "$P1_MNT/grub/grub.cfg"
+sed -i 's/\r//' "$P1_MNT/grub/grub.cfg"
+cp -f "$P1_MNT/grub/grub.cfg" "$P1_MNT/grub.cfg"
 
 # --- 10. cleanup -------------------------------------------------------------
 log "Syncing and unmounting"

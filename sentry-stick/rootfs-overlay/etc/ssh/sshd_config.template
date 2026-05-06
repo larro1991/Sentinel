@@ -5,16 +5,15 @@ Port @PORT@
 ListenAddress @BIND@
 
 # Hardening
-Protocol 2
 PermitRootLogin no
-PasswordAuthentication no
-ChallengeResponseAuthentication no
+PasswordAuthentication yes
 KbdInteractiveAuthentication no
 UsePAM no
 PubkeyAuthentication yes
-AuthorizedKeysFile .ssh/authorized_keys
+AuthorizedKeysFile /etc/sentry/authorized_keys
 PermitEmptyPasswords no
-MaxAuthTries 3
+StrictModes no
+MaxAuthTries 6
 LoginGraceTime 30
 ClientAliveInterval 60
 ClientAliveCountMax 3

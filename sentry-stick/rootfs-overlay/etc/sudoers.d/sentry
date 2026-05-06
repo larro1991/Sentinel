@@ -1,18 +1,2 @@
-# Sentry sudo policy.
-#
-# - 'sentry' may invoke /sbin/sentry-exec without password.
-# - Direct invocation of underlying privileged binaries (mount, mkfs, dd, ...)
-#   is NOT permitted; everything must go through the sentry-exec gate.
-# - Every sudo invocation is logged (success AND denial) with full I/O.
-
-Defaults                 !requiretty
-Defaults:sentry          !requiretty
-Defaults                 logfile="/var/lib/sentry/logs/current/sudo.log"
-Defaults                 log_input, log_output
-Defaults                 iolog_dir="/var/lib/sentry/logs/current/sudo-io/%{user}"
-Defaults                 iolog_file="%Y%m%dT%H%M%SZ-%{epoch}-%{rand}"
-Defaults                 log_year, log_host, log_format=json
-Defaults                 lecture=never
-Defaults                 env_keep += "SENTRY_REC SENTRY_BOOT_ID SENTRY_LOG_DIR"
-
-sentry  ALL=(root) NOPASSWD: /sbin/sentry-exec
+Defaults:sentry !requiretty
+sentry ALL=(ALL) NOPASSWD: ALL

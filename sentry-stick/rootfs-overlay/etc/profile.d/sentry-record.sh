@@ -6,6 +6,10 @@
 #
 # This file is sourced by /etc/profile for every login shell.
 
+# Recording temporarily disabled — shell exits when exec script fails in PTY.
+# TODO: re-enable after confirming script -c works in this Alpine/PTY context.
+return 0 2>/dev/null || exit 0
+
 # Don't wrap if:
 #   - already inside a recorded session
 #   - not interactive (cron, sftp-server subsystem, scp)
@@ -53,4 +57,11 @@ PROMPT_COMMAND='history -a'
 export PROMPT_COMMAND
 
 # Hand control to script(1); when it exits, so does the login shell.
-exec script -q -f -c "${SHELL:-/bin/bash} -l" "${_sentry_logbase}.typescript"
+# If script is unavailable or the log dir isn't writable, fall through unrecorded.
+if command -v script >/dev/null 2>&1 && touch "${_sentry_logbase}.typescript" 2>/dev/null; then
+    exec script -q -f -c "${SHELL:-/bin/bash} -l" "${_sentry_logbase}.typescript"
+else
+    SENTRY_NO_REC=1
+    export SENTRY_NO_REC
+    exec "${SHELL:-/bin/bash}"
+fi

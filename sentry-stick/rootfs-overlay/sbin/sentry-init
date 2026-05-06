@@ -38,9 +38,13 @@ BANNER_FILE=/etc/sentry/banner
 
 mkdir -p /run /etc/sentry
 
-# Mirror everything to tmpfs early log + tty + syslog.
-exec > >(tee -a "$EARLY_LOG" | logger -t sentry-init -p user.info) 2>&1
-echo "===== sentry-init starting boot_id=$BOOT_ID ts=$BOOT_TS ====="
+# Log to tmpfs file + copy to console + syslog via background pipe.
+# Uses a POSIX-compatible approach (no bash process substitution).
+exec >> "$EARLY_LOG" 2>&1
+# Also mirror to console fd 3 so operator sees output on tty.
+exec 3>/dev/console 2>/dev/null || exec 3>/dev/null
+_log() { echo "$*" | tee /dev/fd/3 || true; }
+echo "===== sentry-init starting boot_id=$BOOT_ID ts=$BOOT_TS =====" | tee /dev/fd/3 || true
 set -x
 
 # --- error handling: never crash the boot ----------------------------------
@@ -83,21 +87,65 @@ fail_soft() {
 echo "[1] mounting boot partition (P1, FAT32, label=SENTRYBOOT)"
 mkdir -p "$P1_MOUNT"
 if ! mountpoint -q "$P1_MOUNT"; then
-    # USB storage enumeration can lag behind init. Retry for up to 15s.
+    # USB storage enumeration lags behind OpenRC on some hardware.
+    # Give the USB stack time to settle before the first attempt.
+    sleep 15
+    mdev -s 2>/dev/null || true
+    udevadm settle --timeout=5 2>/dev/null || true
+
+    modprobe vfat 2>/dev/null || true
+
+    _try_mount() {
+        # Derive P1 from whichever device holds our rootfs (P2).
+        # /proc/mounts is always accurate after switch_root.
+        local root_src disk p1_from_root
+        root_src=$(awk '$2=="/" {print $1; exit}' /proc/mounts 2>/dev/null || true)
+        echo "[1] /proc/mounts root src: ${root_src:-(empty)}"
+        if [ -n "$root_src" ]; then
+            case "$root_src" in
+                *nvme*p[0-9]*|*mmcblk*p[0-9]*|*loop*p[0-9]*)
+                    disk=${root_src%p[0-9]*}; p1_from_root="${disk}p1" ;;
+                *[0-9])
+                    disk=${root_src%[0-9]*}; p1_from_root="${disk}1" ;;
+            esac
+        fi
+
+        # Try every candidate — mount as vfat, verify it has engagement.yaml or authorized_keys.
+        for d in "$p1_from_root" \
+                 /dev/disk/by-label/SENTRYBOOT \
+                 /dev/sda1 /dev/sdb1 /dev/sdc1 /dev/sdd1 \
+                 /dev/nvme0n1p1 /dev/nvme1n1p1 \
+                 /dev/mmcblk0p1 /dev/mmcblk1p1; do
+            [ -n "$d" ] || continue
+            [ -b "$d" ] || [ -L "$d" ] || continue
+            mount -t vfat -o rw "$d" "$P1_MOUNT" 2>/dev/null || continue
+            if [ -f "$P1_MOUNT/engagement.yaml" ] || [ -f "$P1_MOUNT/authorized_keys" ]; then
+                echo "[1] SENTRYBOOT mounted from $d"
+                return 0
+            fi
+            echo "[1] $d mounted but no engagement.yaml — not SENTRYBOOT, unmounting"
+            umount "$P1_MOUNT" 2>/dev/null || true
+        done
+
+        # Last resort: blkid label scan across all block devices
+        local dev
+        dev=$(blkid -L SENTRYBOOT 2>/dev/null || true)
+        if [ -n "$dev" ]; then
+            mount -t vfat -o rw "$dev" "$P1_MOUNT" 2>/dev/null && return 0
+        fi
+        return 1
+    }
+
     mounted=0
-    for _try in 1 2 3 4 5; do
-        if mount -t vfat -o rw /dev/disk/by-label/SENTRYBOOT "$P1_MOUNT" 2>/dev/null; then
+    for _try in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        if _try_mount; then
             mounted=1; break
         fi
-        # Fallback: by-partlabel
-        if mount -o rw /dev/disk/by-partlabel/SENTRYBOOT "$P1_MOUNT" 2>/dev/null; then
-            mounted=1; break
-        fi
-        echo "[1] SENTRYBOOT not found yet (attempt $_try/5) — waiting 3s for USB..."
+        echo "[1] SENTRYBOOT not found yet (attempt $_try/15) — waiting 3s..."
         sleep 3
     done
     if [ "$mounted" -eq 0 ]; then
-        fail_soft "could not mount SENTRYBOOT after 5 attempts — engagement.yaml unreadable"
+        fail_soft "could not mount SENTRYBOOT after 15 attempts — engagement.yaml unreadable"
     fi
 fi
 
@@ -122,10 +170,27 @@ mount --bind "$LOG_DIR/var-log" /var/log || fail_soft "/var/log bind-mount faile
 # Touch the exec audit log so sentry-exec can append immediately.
 : > "$LOG_DIR/exec.jsonl"
 
-# Snapshot the early log into the persistent dir from here on out.
+# Fix sudoers.d permissions early — sudo refuses world-writable directories.
+chmod 750 /etc/sudoers.d 2>/dev/null || true
+chown root:root /etc/sudoers.d 2>/dev/null || true
+chmod 440 /etc/sudoers.d/sentry 2>/dev/null || true
+echo "[1] sudoers.d fixed: $(ls -ld /etc/sudoers.d)"
+
+# Load SATA/storage drivers early so drives appear before section 9 network.
+echo "[1] loading storage drivers (ahci, sd_mod)..."
+for _mod in ahci libahci libata sd_mod scsi_mod; do
+    modprobe "$_mod" 2>/dev/null && echo "[1]   loaded: $_mod" || true
+done
+sleep 1
+echo "[1] block devices after storage modprobe: $(lsblk -d -o NAME,SIZE 2>/dev/null | tr '\n' '|')"
+
+# Copy early log and switch stdout+stderr to append directly to boot.log on P3.
+# (Process substitution + logger pipe was broken: logger fails when syslog isn't
+# running, breaks the pipe, tee exits, all subsequent output lost.)
 cp -f "$EARLY_LOG" "$LOG_DIR/boot.log" 2>/dev/null
-# Keep tee'ing into both for the rest of init.
-exec > >(tee -a "$LOG_DIR/boot.log" | logger -t sentry-init -p user.info) 2>&1
+echo "[1] switching log fd to $LOG_DIR/boot.log"
+exec 1>> "$LOG_DIR/boot.log" 2>&1
+echo "[1] log fd switched — all subsequent output goes to boot.log"
 
 # --- 2. detect boot device and auto-exclude it -----------------------------
 BOOT_PART=$(findmnt -no SOURCE "$P1_MOUNT" 2>/dev/null || true)
@@ -269,29 +334,61 @@ if ! id sentry >/dev/null 2>&1; then
 fi
 # Switch shell if changed since last boot
 sed -i "s|^sentry:.*|sentry:x:$(id -u sentry):$(id -g sentry)::/home/sentry:$SENTRY_SHELL|" /etc/passwd
-# Unlock + clear password (key-only auth — but locked accounts are refused by some sshd builds).
-passwd -d sentry >/dev/null 2>&1 || true
 
-mkdir -p /home/sentry/.ssh
+mkdir -p /home/sentry/.ssh /etc/sentry
+chmod 755 /home/sentry
+# sshd reads keys from /etc/sentry/authorized_keys (absolute, root-owned — no chown needed).
+# We also mirror to .ssh/authorized_keys for tools that expect the standard location.
+SSHD_KEYS=/etc/sentry/authorized_keys
 key_count=0
 if [ -r "$KEYS_FILE" ]; then
     # Strip comments, blank lines, and Windows CRLF (\r) before installing
-    grep -vE '^\s*(#|$)' "$KEYS_FILE" | tr -d '\r' > /home/sentry/.ssh/authorized_keys
-    key_count=$(wc -l < /home/sentry/.ssh/authorized_keys)
+    grep -vE '^\s*(#|$)' "$KEYS_FILE" | tr -d '\r' > "$SSHD_KEYS"
+    key_count=$(grep -c '' "$SSHD_KEYS" 2>/dev/null || echo 0)
+    # Mirror to .ssh as well (best-effort; chown may not work in all envs).
+    cp -f "$SSHD_KEYS" /home/sentry/.ssh/authorized_keys 2>/dev/null || true
 else
-    : > /home/sentry/.ssh/authorized_keys
-    fail_soft "no $KEYS_FILE on boot partition; SSH will refuse all logins"
+    # SENTRYBOOT not mounted — keep pre-baked keys if present.
+    key_count=$(grep -c '' "$SSHD_KEYS" 2>/dev/null || echo 0)
+    fail_soft "no $KEYS_FILE on boot partition; using pre-baked keys (count=$key_count)"
 fi
-chown -R sentry:sentry /home/sentry/.ssh
-chmod 700 /home/sentry/.ssh
-chmod 600 /home/sentry/.ssh/authorized_keys
-echo "[8] installed $key_count authorized key(s) for 'sentry' (shell=$SENTRY_SHELL)"
+chmod 644 "$SSHD_KEYS"
+chown -R sentry:sentry /home/sentry/.ssh 2>/dev/null || true
+chmod 700 /home/sentry/.ssh 2>/dev/null || true
+echo "[8] authorized_keys content (from $SSHD_KEYS):"
+cat "$SSHD_KEYS" | head -5 || echo "(empty)"
+echo "[8] sshd key file permissions: $(ls -la $SSHD_KEYS)"
+echo "[8] home dir permissions: $(ls -ld /home/sentry)"
+
+echo "[8] installed $key_count key(s) for 'sentry' (shell=$SENTRY_SHELL) — password kept for fallback"
+
 
 # --- 9. network bring-up ----------------------------------------------------
 echo "[9] bringing up $IFACE ($NET_MODE)"
+
+# Initramfs network feature not included - load NIC drivers from rootfs modules.
+echo "[9] loading NIC kernel modules..."
+for _mod in igc e1000e r8169 atlantic tg3 i40e mlx5_core bnxt_en be2net; do
+    modprobe "$_mod" 2>/dev/null && echo "[9]   loaded: $_mod" || true
+done
+mdev -s 2>/dev/null || true
+sleep 2
+echo "[9] interfaces after modprobe: $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | tr '\n' ' ')"
+
 if ! ip link show "$IFACE" >/dev/null 2>&1; then
-    fail_soft "interface $IFACE not present; available: $(ip -o link | awk -F': ' '{print $2}' | tr '\n' ' ')"
-else
+    # Configured interface not found — try to auto-detect first non-loopback NIC.
+    echo "[9] $IFACE not found — probing for available NICs..."
+    mdev -s 2>/dev/null || true
+    sleep 3
+    AUTO=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -v '^lo$' | head -1)
+    if [ -n "$AUTO" ]; then
+        echo "[9] auto-detected NIC: $AUTO (was configured as $IFACE)"
+        IFACE=$AUTO
+    else
+        fail_soft "no NIC found; tried $IFACE and auto-detect; available: $(ip -o link | awk -F': ' '{print $2}' | tr '\n' ' ')"
+    fi
+fi
+if true; then
     ip link set "$IFACE" up
     case "$NET_MODE" in
         dhcp)
