@@ -57,8 +57,12 @@ var allowedCmds = map[string]bool{
 	"ollama": true,
 	// go
 	"go": true,
+	// Proxmox VM/CT/storage management
+	"qm": true, "pct": true, "pvesh": true, "pvesm": true, "pveum": true, "pvecm": true,
+	// file ops (non-destructive writes via tee, copies, dirs)
+	"cp": true, "mkdir": true, "ln": true, "touch": true,
 	// misc safe
-	"zpool": true, "zfs": true, "efibootmgr": true,
+	"zpool": true, "zfs": true, "efibootmgr": true, "qemu-img": true,
 }
 
 // splitPipe splits a command on | and returns each segment's trimmed tokens.

@@ -118,6 +118,7 @@ func main() {
 	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/info", handleInfo)
 	mux.HandleFunc("/shell", handleShell)
+	mux.HandleFunc("/script", handleScript)
 	mux.HandleFunc("/reboot", handleReboot)
 	mux.HandleFunc("/poweroff", handlePoweroff)
 
