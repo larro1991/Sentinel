@@ -985,17 +985,13 @@ def process_action_tags(response: str, task: str, chat_id: str) -> str:
         results.append(f"$ {cmd}\n{out}")
     results_block = "\n\n".join(results)
     followup = (
-        f"The user asked: {task}\n\n"
+        f"Original task: {task}\n\n"
         f"Command results:\n{results_block}\n\n"
-        "Give a concise plain-English answer based on these results. "
-        "Suitable for voice — one or two sentences max. "
-        "If a restart completed, confirm it. If a service is down, say so and what was done."
+        "Complete the task using these results. "
+        "If this is a file edit, emit [WRITE:path]full modified content[/WRITE]. "
+        "If it is a status query, give a plain-English answer (1-2 sentences)."
     )
-    synthesis = _call_ollama([{"role": "user", "content": followup}])
-    if synthesis:
-        return synthesis
-    cleaned = _ACTION_RE.sub("", response).strip()
-    return f"{cleaned}\n\nResults:\n{results_block}"
+    return _generate(followup, chat_id)
 
 
 def build_pm_context() -> str:
