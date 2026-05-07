@@ -1,5 +1,5 @@
 #!/bin/sh
-# sentry-install.sh — M3 installer for m2-agent (embedded UAI bridge)
+# sentry-install.sh — M4 installer for m2-agent (embedded UAI bridge)
 # Deploys m2-agent as a system service and optionally writes /EFI/Sentry/ to the host ESP.
 #
 # Usage:
@@ -12,7 +12,7 @@
 #   --name  NAME       Agent name (default: hostname)
 #   --port  PORT       Local agent listen port (default: 7800)
 #   --binary PATH      Use local binary instead of downloading
-#   --efi              Also write /EFI/Sentry/ to host ESP
+#   --efi              Download full EFI payload and write /EFI/Sentry/ to host ESP
 #   --uninstall        Remove agent service (and /EFI/Sentry/ if present)
 #   --dry-run          Print plan, touch nothing
 
@@ -24,6 +24,7 @@ INSTALL_BIN="/usr/local/bin/m2-agent"
 SERVICE_NAME="m2-agent"
 SERVICE_FILE="/etc/systemd/system/m2-agent.service"
 OPENRC_FILE="/etc/init.d/m2-agent"
+EFI_PAYLOAD_BASE="${EFI_PAYLOAD_URL:-http://192.168.110.185:7703}"
 EFI_DIR="/EFI/Sentry"
 
 BROKER_URL=""
@@ -146,6 +147,18 @@ find_esp_mount() {
   findmnt -n -o TARGET "$ESP_DEV" 2>/dev/null || echo ""
 }
 
+download_file() {
+  URL="$1"; DEST="$2"; DESC="$3"
+  log "  Downloading $DESC..."
+  if command -v curl >/dev/null 2>&1; then
+    curl -sfL --progress-bar -o "$DEST" "$URL" || die "Failed to download $DESC from $URL"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --show-progress -O "$DEST" "$URL" 2>&1 || die "Failed to download $DESC from $URL"
+  else
+    die "Need curl or wget to download $DESC."
+  fi
+}
+
 write_efi_sentry() {
   ESP_DEV="$(find_esp_device)"
   [ -z "$ESP_DEV" ] && die "Could not locate ESP device. Use a system with UEFI + GPT."
@@ -165,35 +178,55 @@ write_efi_sentry() {
   FREE_KIB="$(df -k "$ESP_MOUNT" | awk 'NR==2{print $4}')"
   FREE_MIB=$((FREE_KIB / 1024))
   log "ESP: $ESP_DEV mounted at $ESP_MOUNT (${FREE_MIB} MiB free)"
-  [ "$FREE_MIB" -lt 5 ] && die "ESP has < 5 MiB free. Cannot write /EFI/Sentry/."
+  [ "$FREE_MIB" -lt 650 ] && die "ESP has < 650 MiB free. Need ~650 MiB for Sentry payload."
 
   SENTRY_EFI="${ESP_MOUNT}/EFI/Sentry"
   run mkdir -p "$SENTRY_EFI"
 
-  # Write engagement stub (full payload goes here in M4)
-  cat > /tmp/sentry-engagement-$$.yaml <<EOF
+  # ── Download EFI payload from Proxmox payload server ───────────────────
+  log "Fetching EFI payload from $EFI_PAYLOAD_BASE ..."
+  PAYLOAD_BASE="${EFI_PAYLOAD_BASE}"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] Would download: vmlinuz-lts, initramfs-lts, rootfs.squashfs, BOOTX64.EFI"
+  else
+    download_file "${PAYLOAD_BASE}/vmlinuz-lts"     "${SENTRY_EFI}/vmlinuz-lts"     "vmlinuz-lts"
+    download_file "${PAYLOAD_BASE}/initramfs-lts"   "${SENTRY_EFI}/initramfs-lts"   "initramfs-lts"
+    download_file "${PAYLOAD_BASE}/rootfs.squashfs" "${SENTRY_EFI}/rootfs.squashfs" "rootfs.squashfs (~500MB)"
+    # BOOTX64.EFI goes to EFI/BOOT/ for removable media fallback + EFI/Sentry/
+    mkdir -p "${ESP_MOUNT}/EFI/BOOT"
+    download_file "${PAYLOAD_BASE}/BOOTX64.EFI"     "${SENTRY_EFI}/BOOTX64.EFI"     "BOOTX64.EFI"
+    cp "${SENTRY_EFI}/BOOTX64.EFI" "${ESP_MOUNT}/EFI/BOOT/BOOTX64.EFI"
+  fi
+
+  # ── Write engagement.yaml ─────────────────────────────────────────────
+  if [ "$DRY_RUN" -eq 0 ]; then
+    cat > "${SENTRY_EFI}/engagement.yaml" <<EOF
 broker: ${BROKER_URL}
 agent_name: ${AGENT_NAME}
 org_token: ${ORG_TOKEN}
 installed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
-  run cp /tmp/sentry-engagement-$$.yaml "${SENTRY_EFI}/engagement.yaml"
-  rm -f /tmp/sentry-engagement-$$.yaml
+  fi
 
-  # Manifest placeholder — M4 adds kernel/initramfs here
-  cat > /tmp/sentry-manifest-$$.json <<EOF
-{
-  "version": "m3",
-  "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "agent_name": "${AGENT_NAME}",
-  "note": "M4 will add vmlinuz + initramfs + grub.cfg to this directory"
-}
-EOF
-  run cp /tmp/sentry-manifest-$$.json "${SENTRY_EFI}/manifest.json"
-  rm -f /tmp/sentry-manifest-$$.json
+  # ── Create EFI boot entry (out of BootOrder — explicit activation only) ─
+  if command -v efibootmgr >/dev/null 2>&1; then
+    DISK_DEV="$(echo "$ESP_DEV" | sed 's/[0-9]*$//')"
+    PART_NUM="$(echo "$ESP_DEV" | grep -o '[0-9]*$')"
+    log "Creating EFI boot entry (inactive, not added to BootOrder)..."
+    run efibootmgr \
+      --disk "$DISK_DEV" \
+      --part "$PART_NUM" \
+      --create-only \
+      --label "Sentry" \
+      --loader "\\EFI\\Sentry\\BOOTX64.EFI"
+    log "  EFI entry created. Activate with: efibootmgr -n <BootXXXX>"
+  else
+    log "  efibootmgr not found — EFI boot entry not created. Install efibootmgr to register."
+  fi
 
-  log "/EFI/Sentry/ written to $ESP_DEV"
-  log "M4 will populate kernel + initramfs — EFI boot entry not created yet."
+  log "/EFI/Sentry/ complete on $ESP_DEV"
+  log "  vmlinuz-lts, initramfs-lts, rootfs.squashfs, BOOTX64.EFI, engagement.yaml"
 
   if [ "$MOUNTED_EXTERNALLY" -eq 0 ]; then
     run umount "$ESP_MOUNT"
@@ -308,3 +341,4 @@ if [ "$UNINSTALL" -eq 1 ]; then
 else
   do_install
 fi
+

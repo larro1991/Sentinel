@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    M3 installer for m2-agent (embedded UAI broker bridge).
+    M4 installer for m2-agent (embedded UAI broker bridge).
     Deploys m2-agent as a Windows service and optionally writes /EFI/Sentry/ to the ESP.
 
 .DESCRIPTION
@@ -58,13 +58,16 @@ param(
     [string]$BinaryPath = "",
     [switch]$EFI,
     [switch]$Uninstall,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [string]$EfiPayloadBase = "http://192.168.110.185:7703"
 )
+
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $BINARY_URL    = "https://github.com/larro1991/bedrock/releases/latest/download/m2-agent-windows-amd64.exe"
+$EFI_PAYLOAD_BASE  = $EfiPayloadBase
 $NSSM_URL      = "https://nssm.cc/release/nssm-2.24.zip"
 $INSTALL_DIR   = "C:\Program Files\Sentry"
 $BINARY_DEST   = "$INSTALL_DIR\m2-agent.exe"
@@ -135,24 +138,29 @@ function Find-EspDrive {
     return $null
 }
 
+function Get-FileFromUrl {
+    param([string]$Url, [string]$Dest, [string]$Desc)
+    Write-Log "  Downloading $Desc..."
+    Invoke-Run {
+        $wc = New-Object System.Net.WebClient
+        $wc.DownloadFile($Url, $Dest)
+    } "Download $Desc -> $Dest"
+}
+
 function Write-EfiSentry {
-    Write-Log "Writing /EFI/Sentry/ stub to ESP..."
+    Write-Log "Writing /EFI/Sentry/ (M4 full payload) to ESP..."
 
     $espDrive = Find-EspDrive
     if (-not $espDrive) {
         Write-Log "ESP not mounted. Attempting to mount via mountvol..."
-        Invoke-Run {
-            $vol = (Get-Partition | Where-Object {
-                $_.GptType -eq "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}"
-            } | Select-Object -First 1).AccessPaths | Select-Object -First 1
-            if ($vol) {
-                # Assign a temporary drive letter
-                $letter = "Z"
-                mountvol "${letter}:" $vol 2>$null
-                $script:espDrive = "${letter}:"
-            }
-        } "Mount ESP to Z:"
-        $espDrive = "Z:"
+        $vol = (Get-Partition | Where-Object {
+            $_.GptType -eq "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}"
+        } | Select-Object -First 1).AccessPaths | Select-Object -First 1
+        if ($vol) {
+            $letter = "Z"
+            Invoke-Run { mountvol "${letter}:" $vol 2>$null } "Mount ESP to Z:"
+            $espDrive = "Z:"
+        }
     }
 
     if (-not $espDrive) {
@@ -160,32 +168,47 @@ function Write-EfiSentry {
         return
     }
 
-    $sentryDir = "$espDrive\EFI\Sentry"
-    Invoke-Run { New-Item -ItemType Directory -Path $sentryDir -Force | Out-Null } `
-                "mkdir $sentryDir"
+    $sentryDir  = "$espDrive\EFI\Sentry"
+    $bootDir    = "$espDrive\EFI\BOOT"
+    $base       = $EFI_PAYLOAD_BASE.TrimEnd('/')
+    Invoke-Run { New-Item -ItemType Directory -Path $sentryDir -Force | Out-Null } "mkdir $sentryDir"
+    Invoke-Run { New-Item -ItemType Directory -Path $bootDir   -Force | Out-Null } "mkdir $bootDir"
 
-    $engagement = @"
-broker: $Broker
-agent_name: $Name
-org_token: $Token
-installed_at: $(Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ" -AsUTC)
-"@
+    # ── Download EFI payload ──────────────────────────────────────────────
+    Write-Log "Fetching EFI payload from $base ..."
+    if (-not $DryRun) {
+        Get-FileFromUrl "$base/vmlinuz-lts"     "$sentryDir\vmlinuz-lts"     "vmlinuz-lts"
+        Get-FileFromUrl "$base/initramfs-lts"   "$sentryDir\initramfs-lts"   "initramfs-lts"
+        Get-FileFromUrl "$base/rootfs.squashfs" "$sentryDir\rootfs.squashfs" "rootfs.squashfs (~500MB)"
+        Get-FileFromUrl "$base/BOOTX64.EFI"     "$sentryDir\BOOTX64.EFI"     "BOOTX64.EFI"
+        Copy-Item "$sentryDir\BOOTX64.EFI" "$bootDir\BOOTX64.EFI" -Force
+    } else {
+        Write-Log "[dry-run] Would download: vmlinuz-lts, initramfs-lts, rootfs.squashfs, BOOTX64.EFI"
+    }
+
+    # ── Write engagement.yaml ─────────────────────────────────────────────
+    $engagement = "broker: $Broker`nagent_name: $Name`norg_token: $Token`ninstalled_at: $(Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ' -AsUTC)"
     Invoke-Run { Set-Content -Path "$sentryDir\engagement.yaml" -Value $engagement -Encoding ASCII } `
                 "Write $sentryDir\engagement.yaml"
 
-    $manifest = @"
-{
-  "version": "m3",
-  "installed_at": "$(Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ" -AsUTC)",
-  "agent_name": "$Name",
-  "note": "M4 will add vmlinuz + initramfs + grub.cfg to this directory"
-}
-"@
-    Invoke-Run { Set-Content -Path "$sentryDir\manifest.json" -Value $manifest -Encoding ASCII } `
-                "Write $sentryDir\manifest.json"
+    # ── Create BCD boot entry (inactive — explicit activation only) ───────
+    Write-Log "Creating BCD boot entry for Sentry (inactive)..."
+    Invoke-Run {
+        $efiPath = "\EFI\Sentry\BOOTX64.EFI"
+        # Check if Sentry entry already exists
+        $existing = bcdedit /enum firmware 2>$null | Select-String "Sentry"
+        if (-not $existing) {
+            bcdedit /copy "{fwbootmgr}" /d "Sentry" 2>$null
+            # Note: bcdedit on Windows can't easily set the EFI path — use efibootmgr from Linux
+            Write-Log "  BCD entry created (may need manual EFI path set via Linux efibootmgr)."
+        } else {
+            Write-Log "  BCD entry 'Sentry' already exists."
+        }
+    } "bcdedit create Sentry entry"
 
-    Write-Log "ESP stub written to $espDrive\EFI\Sentry\"
-    Write-Log "M4 will populate kernel + initramfs -- EFI boot entry not created yet."
+    Write-Log "/EFI/Sentry/ complete on $espDrive"
+    Write-Log "  Files: vmlinuz-lts, initramfs-lts, rootfs.squashfs, BOOTX64.EFI, engagement.yaml"
+    Write-Log "  Activate boot: use efibootmgr from Linux or manually in BIOS boot order"
 }
 
 function Invoke-Install {
@@ -312,3 +335,5 @@ if ($Uninstall) {
 } else {
     Invoke-Install
 }
+
+
