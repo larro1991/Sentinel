@@ -1093,7 +1093,7 @@ def _generate(task: str, chat_id: str, voice: bool = False, image_b64: str | Non
             role = "User" if msg["role"] == "user" else "PM"
             history_section += f"{role}: {msg['content']}\n"
     full_task = f"{context}{history_section}\n\n---\nUser: {task}"
-    _used_model = "claude-haiku-4-5-20251001"
+    _used_model = "claude-sonnet-4-6"
     response = None
     if image_b64 is None and not _CODE_RE.search(task):
         log(f"[ORCH] Routing to local model ({PM_LOCAL_MODEL})")
@@ -1119,7 +1119,7 @@ def _generate(task: str, chat_id: str, voice: bool = False, image_b64: str | Non
             else:
                 user_content = full_task
             payload = json.dumps({
-                "model": "claude-haiku-4-5-20251001",
+                "model": "claude-sonnet-4-6",
                 "max_tokens": 4096,
                 "messages": [{"role": "user", "content": user_content}],
             })
