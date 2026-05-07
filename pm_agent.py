@@ -43,7 +43,9 @@ PM_LOCAL_MODEL   = os.environ.get("PM_LOCAL_MODEL", "qwen2.5:14b")
 _CODE_RE = re.compile(
     r'(write|create|generate|implement|build|script|debug|fix|refactor'
     r'|function|class|module|endpoint|sql|bash|python|powershell|javascript'
-    r'|dockerfile|compose)',
+    r'|dockerfile|compose'
+    r'|change|update|modify|edit|set|configure|enable|disable|restart|deploy'
+    r'|install|remove|delete|add|rename)',
     re.IGNORECASE,
 )
 
