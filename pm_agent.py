@@ -50,6 +50,7 @@ _CODE_RE = re.compile(
 )
 
 PM_HTTP_TOKEN = os.environ.get("PM_HTTP_TOKEN", "tZuGme-gu_8n3KMFg3kU-8EQPp2KaXZhmO0VbHJ2Rhs")
+COS_TOKEN     = os.environ.get("COS_TOKEN", "cos-larro-8f3a91b2e4d7c056")
 PM_HTTP_PORT  = int(os.environ.get("PM_HTTP_PORT", "3000"))
 
 INFRA_STATIC = """
@@ -101,13 +102,13 @@ Automation pipeline (all healthy unless noted):
 Paths: media=/mnt/Main/Media  appdata=/mnt/Main/appdata  services=/mnt/Main/services
 Total running: 42 containers. Boot: sentry USB -> Proxmox -> ZFS -> Docker -> compose-stacks
 
-ACTION CAPABILITY -- use [ACTION:cmd] to run commands inline.
-Allowed prefixes:
-  docker ps, docker logs, docker restart, docker inspect, docker stats, docker exec
-  docker compose up, docker compose down (down requires YES/NO confirm)
+ACTION CAPABILITY -- use [ACTION:cmd] to run read-only diagnostics inline.
+Allowed prefixes (read-only only — no restarts, no compose changes):
+  docker ps, docker logs, docker inspect, docker stats, docker exec
   df -h, free -h, uptime, zpool status, nvidia-smi
   systemctl status, journalctl -u
   curl -s http://localhost, curl -s http://192.168.110.185
+Container restarts/changes must go through ops-monitor API. Escalate to Claude for infra changes.
 
 Example: "Checking Emby: [ACTION:docker ps --filter name=emby --format '{{.Names}}	{{.Status}}']"
 ## File Write Capability — MANDATORY FORMAT
@@ -151,8 +152,8 @@ EXPECTED_CONTAINERS = {
 }
 
 _CMD_WHITELIST = [
-    "docker ps", "docker logs", "docker restart", "docker inspect",
-    "docker stats", "docker exec", "docker compose up", "docker compose down",
+    "docker ps", "docker logs", "docker inspect",
+    "docker stats", "docker exec",
     "df -h", "free -h", "uptime", "zpool status", "nvidia-smi",
     "systemctl status", "systemctl is-enabled", "systemctl is-active",
     "journalctl -u",
@@ -287,11 +288,8 @@ RESOURCE_CLAIMS = [
     ("LAX",    "f:\\launchbox",                   "read",       "Phase1-2 source"),
     ("LAX",    "f:\\launchbox",                   "write",      "Phase3 backup dest"),
     ("STREAM", "n:\\launchbox\\games",            "read",       "streaming source"),
-    ("EMB",    "/mnt/main/appdata/ember",         "read/write", "source+data"),
-    ("EMB",    "/mnt/main/appdata/ember/scripts", "read/write", "scripts"),
     ("PMA",    "/mnt/main/appdata/pm-agent",      "read/write", "agent source"),
-    ("PMA",    "/mnt/main/appdata/ember/scripts", "read/write", "log+state"),
-    ("INFRA",  "/mnt/main",                       "read/write", "TrueNAS pool"),
+    ("INFRA",  "/mnt/main",                       "read/write", "Proxmox ZFS pool"),
 ]
 
 
@@ -1044,7 +1042,7 @@ def build_pm_context() -> str:
         "",
         "## Project ID Reference",
         "ITG=ITGlue Audit/MSP Toolkit (ConnectWise+ITGlue automation), CON=Conduit (MSP platform), "
-        "LAX=LaunchBox/Arcade, EMB=EMBER (AI assistant), GK=GuildKeep (nonprofit CRM), "
+        "LAX=LaunchBox/Arcade, GK=GuildKeep (nonprofit CRM), "
         "INFRA=Infrastructure, PMA=PM Agent, STREAM=Game Streaming, DW=darkwatch",
     ]
     return "\n".join(lines)
@@ -1397,74 +1395,58 @@ import time as _time
 
 _PROACTIVE_INTERVAL = 1200  # 20 minutes
 
+# Track last-seen alert IDs so we only notify on new ones
+_seen_alert_ids: set = set()
+
 def _proactive_tick():
-    global _proactive_blocked
+    """Query ops-monitor and program status. Surface new alerts to Telegram. No autonomous execution."""
+    alerts_text = []
+    blocked_text = []
 
-    if _proactive_blocked:
-        log(f"[PROACTIVE] paused — {len(_proactive_blocked)} blocked item(s)")
-        return
+    # 1. Query ops-monitor /alerts
+    try:
+        import urllib.request as _ur
+        req = _ur.Request(f"{BURR_API}/alerts", headers={"X-CoS-Token": COS_TOKEN})
+        with _ur.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        raw_alerts = data.get("alerts", [])
+        new_alerts = [a for a in raw_alerts
+                      if not a.get("resolved_at") and a.get("id") not in _seen_alert_ids]
+        for a in new_alerts:
+            _seen_alert_ids.add(a["id"])
+            alerts_text.append(f"• [{a.get('alert_type','?')}] {a.get('service','?')}: {a.get('message','')}")
+    except Exception as e:
+        log(f"[PROACTIVE] ops-monitor /alerts error: {e}", "WARN")
 
+    # 2. Query program status for blocked P1/P2
     try:
         status = program_status()
+        projects = (status or {}).get("projects", [])
+        for p in projects:
+            pri = str(p.get("priority","")).upper()
+            blocked = p.get("blocked_by") or p.get("blockers")
+            is_blocked = str(p.get("status","")).lower() == "blocked" or bool(blocked)
+            if pri in ("P1","P2") and is_blocked:
+                reason = blocked if isinstance(blocked, str) else (str(blocked) if blocked else "unknown")
+                blocked_text.append(f"• {p.get('id','?')} ({p.get('name','?')}): {reason}")
     except Exception as e:
         log(f"[PROACTIVE] program_status error: {e}", "WARN")
+
+    if not alerts_text and not blocked_text:
+        log("[PROACTIVE] nothing new to surface")
         return
 
-    projects = (status or {}).get("projects", [])
-    active = [p for p in projects
-              if str(p.get("status","")).lower() == "active"
-              and str(p.get("priority","")).upper() in ("P1","P2")]
+    lines = ["[PM Status]"]
+    if alerts_text:
+        lines.append("*Alerts:*")
+        lines.extend(alerts_text[:5])
+    if blocked_text:
+        lines.append("*Blocked P1/P2:*")
+        lines.extend(blocked_text[:5])
 
-    if not active:
-        log("[PROACTIVE] no active P1/P2 projects — idle")
-        return
-
-    task_lines = "\n".join(
-        f"- {p.get('id','?')}: {p.get('name','?')} | phase={p.get('phase','?')} | blocked={p.get('blocked_by','none')}"
-        for p in active[:5]
-    )
-    log(f"[PROACTIVE] {len(active)} active projects — ticking")
-
-    prompt = (
-        "You are in autonomous work mode. Larry is not watching right now.\n"
-        "Active P1/P2 projects:\n" + task_lines + "\n\n"
-        "Pick the most actionable next step and execute it.\n"
-        "Use [ACTION:cmd] for shell commands (whitelisted only).\n"
-        "Use [WRITE:/path]content[/WRITE] for file edits (whitelisted paths only).\n"
-        "Record completions with [REMEMBER: completed X for PROJECT].\n"
-        "If stuck and need Larry or Claude, output exactly: [BLOCKED: PROJECT — reason]\n"
-        "Do not ask questions. Act or declare blocked. Be brief."
-    )
-
-    reply = _call_ollama([{"role": "user", "content": prompt}])
-    if not reply:
-        log("[PROACTIVE] no reply from local model", "WARN")
-        return
-
-    log(f"[PROACTIVE] reply: {reply[:120]}")
-
-    # BLOCKED takes priority
-    for m in _BLOCKED_RE.finditer(reply):
-        reason = m.group(1).strip()
-        _proactive_blocked.append(reason)
-        log(f"[PROACTIVE] BLOCKED: {reason}", "WARN")
-        tg_send(f"PM blocked — needs input:\n• {reason}")
-        return
-
-    # Process other patterns
-    processed = process_action_tags(reply, "(proactive)", "")
-    for m in _REMEMBER_RE.finditer(reply):
-        _save_pm_memory(m.group(1))
-    write_results = []
-    for m in _WRITE_RE.finditer(reply):
-        write_results.append(_handle_write(m.group(1), m.group(2)))
-
-    did_work = "[ACTION:" in reply or _REMEMBER_RE.search(reply) or _WRITE_RE.search(reply)
-    if did_work:
-        clean = re.sub(r"\[ACTION:[^\]]+\]", "", processed, flags=re.DOTALL)
-        clean = _REMEMBER_RE.sub("", clean)
-        clean = _WRITE_RE.sub("", clean).strip()
-        tg_send(f"[PM Auto]\n{clean[:280]}")
+    msg = "\n".join(lines)
+    log(f"[PROACTIVE] surfacing {len(alerts_text)} alert(s), {len(blocked_text)} blocked")
+    tg_send(msg)
 
 
 def _proactive_loop():
