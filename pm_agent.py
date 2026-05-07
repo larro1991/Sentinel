@@ -1155,6 +1155,27 @@ def _generate(task: str, chat_id: str, voice: bool = False, image_b64: str | Non
         log("[ORCH] Action tags found — executing")
         response = process_action_tags(response, task, chat_id)
         log(f"[ORCH] Post-action response: {response[:100]!r}")
+    # Catch hallucinated "done" responses: model claims success without [WRITE:]
+    _DONE_CLAIM_RE = re.compile(
+        r"(done|complete[d]?|applied|updated|changed|fixed|set|modified)",
+        re.IGNORECASE,
+    )
+    if (response
+            and _DONE_CLAIM_RE.search(response)
+            and not _WRITE_RE.search(response)
+            and _CODE_RE.search(task)):
+        log("[ORCH] Hallucination detected: claimed done without [WRITE:] -- retrying", "WARN")
+        retry_prompt = (
+            "Previous task: " + task + ". "
+            "You claimed the task was done but NO [WRITE:] tag was emitted. "
+            "You cannot modify files without [WRITE:]. "
+            "Read the file with [ACTION:cat <path>] then emit "
+            "[WRITE:path]full-modified-content[/WRITE]. Do this now."
+        )
+        response = _generate(retry_prompt, chat_id)
+        if response and _ACTION_RE.search(response):
+            response = process_action_tags(response, task, chat_id)
+        log(f"[ORCH] Retry response: {(response or '')[:100]!r}")
     audit_log("response", response or "", chat_id, {"model": _used_model})
     return response or "No response generated."
 
