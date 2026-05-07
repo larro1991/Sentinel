@@ -34,6 +34,8 @@ _DESTRUCTIVE_RE = re.compile(
 
 _PENDING_CONFIRMS: dict[str, dict] = {}
 _PENDING_LOCK = threading.Lock()
+_proactive_blocked: list = []
+_BLOCKED_RE = re.compile(r'\[BLOCKED:\s*(.+?)\]', re.IGNORECASE | re.DOTALL)
 
 LOCAL_OLLAMA_URL = os.environ.get("LOCAL_OLLAMA_URL", "http://192.168.110.185:11434")
 PM_LOCAL_MODEL   = os.environ.get("PM_LOCAL_MODEL", "qwen2.5:14b")
@@ -191,6 +193,8 @@ def _handle_write(path: str, content: str) -> str:
         log(f"[WRITE] BLOCKED: {path}", "WARN")
         return f"[write blocked — {path} not in whitelist; ask Claude to make this change]"
     try:
+        content = re.sub(r'^```[a-z]*\n?', '', content.strip())
+        content = re.sub(r'\n?```$', '', content).strip() + "\n"
         if os.path.exists(path):
             shutil.copy2(path, path + ".bak")
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
