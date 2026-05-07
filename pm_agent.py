@@ -120,6 +120,77 @@ def session_status_summary() -> dict:
             break
     return result
 
+# ── Session registry (live state + lane conflict detection) ───────────────────
+_SESSION_REGISTRY: dict = {}   # {name: {session, project, files, summary, ts, status}}
+_SESSION_REGISTRY_FILE = os.environ.get("PM_SESSION_REGISTRY", "/mnt/pm-data/session_registry.json")
+_SESSION_REGISTRY_LOCK = threading.Lock()
+
+def _load_session_registry():
+    global _SESSION_REGISTRY
+    try:
+        with open(_SESSION_REGISTRY_FILE) as f:
+            _SESSION_REGISTRY = json.load(f)
+    except FileNotFoundError:
+        _SESSION_REGISTRY = {}
+    except Exception as e:
+        log(f"[SESSION-REG] load error: {e}", "WARN")
+        _SESSION_REGISTRY = {}
+
+def _save_session_registry():
+    try:
+        os.makedirs(os.path.dirname(_SESSION_REGISTRY_FILE), exist_ok=True)
+        with open(_SESSION_REGISTRY_FILE, "w") as f:
+            json.dump(_SESSION_REGISTRY, f, indent=2)
+    except Exception as e:
+        log(f"[SESSION-REG] save error: {e}", "WARN")
+
+def session_registry_update(session: str, project: str, files: list,
+                             summary: str, status: str = "active") -> dict:
+    """Update session state. Detect same-project conflicts and alert via Telegram."""
+    now = datetime.utcnow().isoformat()
+    conflicts = []
+    with _SESSION_REGISTRY_LOCK:
+        if project:
+            for other_name, other in _SESSION_REGISTRY.items():
+                if other_name == session or other.get("project") != project:
+                    continue
+                try:
+                    age = (datetime.utcnow() - datetime.fromisoformat(other.get("ts", ""))).total_seconds()
+                    if age < 7200:   # active within 2 h
+                        conflicts.append(other_name)
+                except Exception:
+                    pass
+        _SESSION_REGISTRY[session] = {
+            "session": session,
+            "project": project,
+            "files": (files or [])[:10],
+            "summary": (summary or "")[:200],
+            "ts": now,
+            "status": status,
+        }
+        _save_session_registry()
+
+    if conflicts:
+        alert = (
+            f"⚠️ LANE CONFLICT: `{session}` and "
+            f"`{', '.join(conflicts)}` both active on **{project}**. "
+            f"Files: {', '.join((files or [])[:3]) or 'unknown'}"
+        )
+        log(f"[SESSION-REG] conflict: {session} vs {conflicts} on {project}", "WARN")
+        tg_send(alert)
+        for other in conflicts:
+            session_msg_post("pm", other, "Lane conflict",
+                f"WARNING: {session} also working on {project}. Coordinate first.")
+        session_msg_post("pm", session, "Lane conflict",
+            f"WARNING: {', '.join(conflicts)} also active on {project}. Check with them.")
+
+    return _SESSION_REGISTRY[session]
+
+def session_registry_get() -> dict:
+    with _SESSION_REGISTRY_LOCK:
+        return dict(_SESSION_REGISTRY)
+
+
 LOCAL_OLLAMA_URL = os.environ.get("LOCAL_OLLAMA_URL", "http://192.168.110.185:11434")
 PM_LOCAL_MODEL   = os.environ.get("PM_LOCAL_MODEL", "qwen2.5:14b")
 
@@ -1369,6 +1440,14 @@ class _ChatHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", len(body))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path == "/api/sessions/registry":
+            data = session_registry_get()
+            body = json.dumps({"ok": True, "registry": data}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", len(body))
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path == "/api/sessions/status":
             data = session_status_summary()
             body = json.dumps({"ok": True, "sessions": data}).encode()
@@ -1449,6 +1528,30 @@ class _ChatHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_error(400)
             return
+        if self.path == "/api/sessions/update":
+            auth = self.headers.get("Authorization", "")
+            if PM_HTTP_TOKEN and auth != f"Bearer {PM_HTTP_TOKEN}":
+                self.send_error(401); return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length))
+                entry = session_registry_update(
+                    body.get("session", "unknown"),
+                    body.get("project", ""),
+                    body.get("files", []),
+                    body.get("summary", ""),
+                    body.get("status", "active"),
+                )
+                resp = json.dumps({"ok": True, "entry": entry}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", len(resp))
+                self.end_headers()
+                self.wfile.write(resp)
+            except Exception as e:
+                log(f"[SESSION-UPDATE] error: {e}", "WARN")
+                self.send_error(400)
+            return
         if self.path == "/api/sessions/message":
             try:
                 length = int(self.headers.get("Content-Length", 0))
@@ -1506,6 +1609,7 @@ class _ChatHandler(BaseHTTPRequestHandler):
 
 def _http_serve():
     _load_session_msgs()
+    _load_session_registry()
     server = HTTPServer(("0.0.0.0", PM_HTTP_PORT), _ChatHandler)
     log(f"[HTTP] Listening on :{PM_HTTP_PORT} — /api/chat + /api/health + /api/sessions/")
     server.serve_forever()
