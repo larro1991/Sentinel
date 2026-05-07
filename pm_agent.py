@@ -1200,6 +1200,7 @@ def orchestrate(task: str, chat_id: str):
         wm = write_matches[0]
         w_path = wm.group(1).strip()
         w_content = wm.group(2)
+        log(f"[WRITE] staging confirm for {w_path!r} ({len(w_content)} chars)")
         with _PENDING_LOCK:
             _PENDING_CONFIRMS[chat_id] = {
                 "type": "write",
@@ -1434,7 +1435,7 @@ def _proactive_tick():
     if did_work:
         clean = re.sub(r"\[ACTION:[^\]]+\]", "", processed, flags=re.DOTALL)
         clean = _REMEMBER_RE.sub("", clean)
-        clean = _WRITE_RE.sub("", clean, flags=re.DOTALL).strip()
+        clean = _WRITE_RE.sub("", clean).strip()
         tg_send(f"[PM Auto]\n{clean[:280]}")
 
 
