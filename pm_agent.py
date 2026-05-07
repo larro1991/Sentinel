@@ -115,16 +115,16 @@ WRONG — do NOT do this:
   "I will change stop_grace_period to 60s. Proceed? YES/NO"
 
 RIGHT — always do this (read file first, then emit full modified content):
-  [ACTION:cat /Main/services/handbrake/docker-compose.yml]
+  [ACTION:cat /mnt/services/handbrake/docker-compose.yml]
   ...then in same response after seeing the content...
-  [WRITE:/Main/services/handbrake/docker-compose.yml]
+  [WRITE:/mnt/services/handbrake/docker-compose.yml]
   ...full modified file content...
   [/WRITE]
 
 Whitelisted paths (others blocked, escalate to Claude):
-- /Main/services/  (compose files — auto-restarts container after YES)
-- /Main/appdata/pm-agent/pm_memory.md
-- /Main/scripts/
+- /mnt/services/  (compose files — auto-restarts container after YES)
+- /mnt/pm-data/pm_memory.md
+- /mnt/scripts/
 
 A .bak backup is created before every write. Compose files auto-restart on YES.
 After execution, results are injected and you give a plain-English answer.
@@ -152,8 +152,9 @@ _CMD_WHITELIST = [
     "systemctl status", "systemctl is-enabled", "systemctl is-active",
     "journalctl -u",
     "curl -s http://localhost", "curl -s http://192.168.110.185",
-    "cat /Main/", "cat /etc/", "ls /Main/", "ls /etc/",
-    "head /Main/", "tail /Main/",
+    "cat /Main/", "cat /mnt/services/", "cat /mnt/scripts/", "cat /etc/",
+    "ls /Main/", "ls /mnt/services/", "ls /mnt/scripts/", "ls /etc/",
+    "head /Main/", "tail /Main/", "head /mnt/", "tail /mnt/",
     "grep ",
     "ollama list", "ollama ps",
 ]
@@ -177,9 +178,9 @@ def _save_pm_memory(fact: str):
 
 _REMEMBER_RE = re.compile(r'\[REMEMBER:\s*(.+?)\]', re.IGNORECASE | re.DOTALL)
 _WRITE_WHITELIST = [
-    "/Main/services/",
-    "/Main/appdata/pm-agent/pm_memory.md",
-    "/Main/scripts/",
+    "/mnt/services/",
+    "/mnt/pm-data/pm_memory.md",
+    "/mnt/scripts/",
 ]
 
 _WRITE_RE = re.compile(r'\[WRITE:([^\]]+)\](.*?)\[/WRITE\]', re.IGNORECASE | re.DOTALL)
@@ -843,7 +844,7 @@ def handle_tg_message(text: str, chat_id: str):
                     audit_log("write_approved", w_path, chat_id)
                     result = _handle_write(w_path, w_content)
                     tg_send(f"Written: {result}", chat_id)
-                    if w_path.startswith("/Main/services/") and "docker-compose" in w_path:
+                    if w_path.startswith("/mnt/services/") and "docker-compose" in w_path:
                         svc_dir = str(Path(w_path).parent)
                         r = subprocess.run(
                             ["docker", "compose", "-f", w_path, "up", "-d"],
