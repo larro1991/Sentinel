@@ -191,6 +191,31 @@ def session_registry_get() -> dict:
         return dict(_SESSION_REGISTRY)
 
 
+# ── Secrets store ─────────────────────────────────────────────────────────────
+_SECRETS_FILE = os.environ.get("PM_SECRETS_FILE", "/mnt/pm-data/secrets.json")
+
+def _load_secrets() -> dict:
+    try:
+        with open(_SECRETS_FILE) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        log(f"[SECRETS] load error: {e}", "WARN")
+        return {}
+
+def secrets_get(service: str | None = None) -> dict:
+    """Return secrets for a specific service, or all services if None."""
+    data = _load_secrets()
+    if not service:
+        return data
+    # Fuzzy match: exact key, or any key containing the service name
+    if service in data:
+        return {service: data[service]}
+    matches = {k: v for k, v in data.items() if service.lower() in k.lower()}
+    return matches if matches else {}
+
+
 LOCAL_OLLAMA_URL = os.environ.get("LOCAL_OLLAMA_URL", "http://192.168.110.185:11434")
 PM_LOCAL_MODEL   = os.environ.get("PM_LOCAL_MODEL", "qwen2.5:14b")
 
@@ -1435,6 +1460,20 @@ class _ChatHandler(BaseHTTPRequestHandler):
             unread_only = qs.get("unread", ["true"])[0].lower() != "false"
             msgs = session_msg_get(to, unread_only)
             body = json.dumps({"ok": True, "messages": msgs, "count": len(msgs)}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", len(body))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path.startswith("/api/secrets"):
+            auth = self.headers.get("Authorization", "")
+            if PM_HTTP_TOKEN and auth != f"Bearer {PM_HTTP_TOKEN}":
+                self.send_error(401); return
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            service = qs.get("service", [None])[0]
+            data = secrets_get(service)
+            body = json.dumps({"ok": True, "secrets": data}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", len(body))
