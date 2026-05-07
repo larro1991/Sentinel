@@ -37,6 +37,89 @@ _PENDING_LOCK = threading.Lock()
 _proactive_blocked: list = []
 _BLOCKED_RE = re.compile(r'\[BLOCKED:\s*(.+?)\]', re.IGNORECASE | re.DOTALL)
 
+# ── Inter-session message bus ──────────────────────────────────────────────────
+_SESSION_MSG_FILE = os.environ.get("PM_SESSION_MSGS", "/mnt/pm-data/session_messages.jsonl")
+_SESSION_MSGS: list = []         # [{id, ts, from, to, subject, body, read}]
+_SESSION_MSG_LOCK = threading.Lock()
+_SESSION_MSG_COUNTER = 0
+
+def _load_session_msgs():
+    global _SESSION_MSGS, _SESSION_MSG_COUNTER
+    try:
+        with open(_SESSION_MSG_FILE) as f:
+            _SESSION_MSGS = [json.loads(l) for l in f if l.strip()]
+        _SESSION_MSG_COUNTER = max((m.get("id", 0) for m in _SESSION_MSGS), default=0)
+    except FileNotFoundError:
+        _SESSION_MSGS = []
+
+def _save_session_msg(msg: dict):
+    try:
+        os.makedirs(os.path.dirname(_SESSION_MSG_FILE), exist_ok=True)
+        with open(_SESSION_MSG_FILE, "a") as f:
+            f.write(json.dumps(msg) + "\n")
+    except Exception as e:
+        log(f"[SESSION-MSG] save error: {e}", "WARN")
+
+def session_msg_post(from_session: str, to_session: str, subject: str, body: str) -> dict:
+    global _SESSION_MSG_COUNTER
+    with _SESSION_MSG_LOCK:
+        _SESSION_MSG_COUNTER += 1
+        msg = {
+            "id": _SESSION_MSG_COUNTER,
+            "ts": datetime.utcnow().isoformat(),
+            "from": from_session,
+            "to": to_session,   # "all" for broadcast
+            "subject": subject,
+            "body": body,
+            "read": False,
+        }
+        _SESSION_MSGS.append(msg)
+        _save_session_msg(msg)
+    log(f"[SESSION-MSG] {from_session} → {to_session}: {subject}")
+    return msg
+
+def session_msg_get(to_session: str, unread_only: bool = True) -> list:
+    with _SESSION_MSG_LOCK:
+        msgs = [m for m in _SESSION_MSGS
+                if m.get("to") in (to_session, "all")
+                and (not unread_only or not m.get("read"))]
+        for m in msgs:
+            m["read"] = True
+        return msgs
+
+def session_status_summary() -> dict:
+    """Read all session memory files and return a compact status dict."""
+    sessions_dir = "/mnt/pm-data/../memory/sessions"  # resolved: memory is at /mnt/pm-data adjacent
+    # fallback paths for inside container
+    candidates = [
+        "/mnt/pm-data/sessions",
+        "/mnt/Main/appdata/pm-agent/sessions",
+    ]
+    import glob as _glob
+    result = {}
+    for base in candidates:
+        files = _glob.glob(f"{base}/*.md")
+        if files:
+            for fpath in files:
+                name = os.path.basename(fpath).replace(".md", "")
+                if name == "archive":
+                    continue
+                try:
+                    content = open(fpath).read(2000)
+                    # Extract Updated and In progress lines
+                    updated = next((l.split("**Updated**:")[1].strip() for l in content.splitlines()
+                                    if "**Updated**:" in l), "?")
+                    in_progress = "?"
+                    for i, l in enumerate(content.splitlines()):
+                        if "**In progress**" in l:
+                            in_progress = (content.splitlines()[i+1] if i+1 < len(content.splitlines()) else l).strip().lstrip("- ")
+                            break
+                    result[name] = {"updated": updated, "in_progress": in_progress[:120]}
+                except Exception:
+                    pass
+            break
+    return result
+
 LOCAL_OLLAMA_URL = os.environ.get("LOCAL_OLLAMA_URL", "http://192.168.110.185:11434")
 PM_LOCAL_MODEL   = os.environ.get("PM_LOCAL_MODEL", "qwen2.5:14b")
 
@@ -1274,6 +1357,26 @@ class _ChatHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", len(body))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith("/api/sessions/messages"):
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            to = qs.get("to", ["all"])[0]
+            unread_only = qs.get("unread", ["true"])[0].lower() != "false"
+            msgs = session_msg_get(to, unread_only)
+            body = json.dumps({"ok": True, "messages": msgs, "count": len(msgs)}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", len(body))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/api/sessions/status":
+            data = session_status_summary()
+            body = json.dumps({"ok": True, "sessions": data}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", len(body))
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self.send_error(404)
 
@@ -1346,6 +1449,25 @@ class _ChatHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_error(400)
             return
+        if self.path == "/api/sessions/message":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length))
+                msg = session_msg_post(
+                    body.get("from", "unknown"),
+                    body.get("to", "all"),
+                    body.get("subject", ""),
+                    body.get("body", ""),
+                )
+                resp = json.dumps({"ok": True, "id": msg["id"]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", len(resp))
+                self.end_headers()
+                self.wfile.write(resp)
+            except Exception as e:
+                self.send_error(400)
+            return
         if self.path != "/api/chat":
             self.send_error(404)
             return
@@ -1383,8 +1505,9 @@ class _ChatHandler(BaseHTTPRequestHandler):
 
 
 def _http_serve():
+    _load_session_msgs()
     server = HTTPServer(("0.0.0.0", PM_HTTP_PORT), _ChatHandler)
-    log(f"[HTTP] Listening on :{PM_HTTP_PORT} — /api/chat + /api/health")
+    log(f"[HTTP] Listening on :{PM_HTTP_PORT} — /api/chat + /api/health + /api/sessions/")
     server.serve_forever()
 
 
