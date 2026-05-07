@@ -34,7 +34,7 @@
 
 .EXAMPLE
     # Basic install
-    .\sentry-install.ps1 -Broker "http://192.168.110.25:7700/broker/heartbeat"
+    .\sentry-install.ps1 -Broker "http://192.168.110.185:7702/broker/heartbeat"
 
 .EXAMPLE
     # Install with token, also write ESP stub

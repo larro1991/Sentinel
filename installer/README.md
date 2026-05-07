@@ -7,7 +7,7 @@ Optionally writes `/EFI/Sentry/` stub to the host ESP (M4 adds kernel/initramfs)
 
 ```sh
 # Basic — installs agent only
-sudo ./sentry-install.sh --broker http://192.168.110.25:7700/broker/heartbeat
+sudo ./sentry-install.sh --broker http://192.168.110.185:7702/broker/heartbeat
 
 # With token + ESP stub
 sudo ./sentry-install.sh \

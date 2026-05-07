@@ -3,7 +3,7 @@
 # Deploys m2-agent as a system service and optionally writes /EFI/Sentry/ to the host ESP.
 #
 # Usage:
-#   ./sentry-install.sh --broker http://192.168.110.25:7700/broker/heartbeat [OPTIONS]
+#   ./sentry-install.sh --broker http://192.168.110.185:7702/broker/heartbeat [OPTIONS]
 #   curl -sfL https://raw.githubusercontent.com/.../sentry-install.sh | sh -s -- --broker URL
 #
 # Options:
