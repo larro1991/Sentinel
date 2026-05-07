@@ -1214,6 +1214,10 @@ def orchestrate(task: str, chat_id: str):
             chat_id,
         )
 
+    # If a write confirm is pending, suppress the remaining text — it looks like a "done" notice
+    if write_matches and chat_id:
+        return
+
     # Auto-file: plain long responses (>2000 chars, no existing file tag)
     if not sent_files and len(clean) > 2000:
         fname = "response.md"
