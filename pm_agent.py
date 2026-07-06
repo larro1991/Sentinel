@@ -60,7 +60,7 @@ def _save_session_msg(msg: dict):
     except Exception as e:
         log(f"[SESSION-MSG] save error: {e}", "WARN")
 
-def session_msg_post(from_session: str, to_session: str, subject: str, body: str) -> dict:
+def session_msg_post(from_session: str, to_session: str, subject: str, body: str, nudge: bool = True) -> dict:
     global _SESSION_MSG_COUNTER
     with _SESSION_MSG_LOCK:
         _SESSION_MSG_COUNTER += 1
@@ -76,6 +76,20 @@ def session_msg_post(from_session: str, to_session: str, subject: str, body: str
         _SESSION_MSGS.append(msg)
         _save_session_msg(msg)
     log(f"[SESSION-MSG] {from_session} → {to_session}: {subject}")
+    # Nudge via Telegram if target session is idle (>10 min) or unknown
+    if nudge and to_session != "all":
+        try:
+            with _SESSION_REGISTRY_LOCK:
+                target = dict(_SESSION_REGISTRY.get(to_session, {}))
+            if not target:
+                tg_send(f"📬 Message for *{to_session}* from {from_session}: _{subject}_\nSession not registered — may need to be opened.")
+            else:
+                age = (datetime.utcnow() - datetime.fromisoformat(target.get("ts", "1970-01-01"))).total_seconds()
+                if age > 600:
+                    idle_min = int(age // 60)
+                    tg_send(f"📬 Message for *{to_session}* from {from_session}: _{subject}_\nSession idle {idle_min}m — kick it to pick up the message.")
+        except Exception:
+            pass
     return msg
 
 def session_msg_get(to_session: str, unread_only: bool = True) -> list:
@@ -177,12 +191,25 @@ def session_registry_update(session: str, project: str, files: list,
             f"Files: {', '.join((files or [])[:3]) or 'unknown'}"
         )
         log(f"[SESSION-REG] conflict: {session} vs {conflicts} on {project}", "WARN")
-        tg_send(alert)
         for other in conflicts:
             session_msg_post("pm", other, "Lane conflict",
-                f"WARNING: {session} also working on {project}. Coordinate first.")
+                f"WARNING: {session} also working on {project}. Coordinate first.", nudge=False)
         session_msg_post("pm", session, "Lane conflict",
-            f"WARNING: {', '.join(conflicts)} also active on {project}. Check with them.")
+            f"WARNING: {', '.join(conflicts)} also active on {project}. Check with them.", nudge=False)
+        # Telegram only if no conflicting session has been active in last 30 min
+        # (if sessions are active they receive the inbox message above)
+        reg_snap = dict(_SESSION_REGISTRY)
+        any_active = False
+        for s in conflicts:
+            try:
+                age = (datetime.utcnow() - datetime.fromisoformat(reg_snap.get(s, {}).get("ts", "1970-01-01"))).total_seconds()
+                if age < 1800:
+                    any_active = True
+                    break
+            except Exception:
+                pass
+        if not any_active:
+            tg_send(alert)
 
     return _SESSION_REGISTRY[session]
 
@@ -1712,7 +1739,23 @@ def _proactive_tick():
 
     msg = "\n".join(lines)
     log(f"[PROACTIVE] surfacing {len(alerts_text)} alert(s), {len(blocked_text)} blocked")
-    tg_send(msg)
+    # Route to active session inboxes; Telegram only if no session is actively polling
+    reg = session_registry_get()
+    active_sessions = []
+    for sname, info in reg.items():
+        try:
+            age = (datetime.utcnow() - datetime.fromisoformat(info.get("ts", "1970-01-01"))).total_seconds()
+            if age < 1800:
+                active_sessions.append(sname)
+        except Exception:
+            pass
+    if active_sessions:
+        for sname in active_sessions:
+            session_msg_post("pm", sname, "PM Status", msg, nudge=False)
+        log(f"[PROACTIVE] routed to sessions: {active_sessions}")
+    else:
+        tg_send(msg)
+        log("[PROACTIVE] no active sessions — sent to Telegram")
 
 
 def _proactive_loop():
